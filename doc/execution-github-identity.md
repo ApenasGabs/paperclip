@@ -41,6 +41,11 @@ Server-side Git operations and GitHub gateway calls follow the same selection ru
 
 Managed commands disable ambient Git credential helpers, Git global/system configuration, host GitHub CLI configuration, and host SSH identity access. Per-operation GitHub CLI configuration is isolated in a writable configuration directory beneath the managed launcher directory. Missing credentials clear previous author and token values; no teammate, standing delegation, host token, or company-default user's account is substituted. Anonymous/local operations remain available where supported.
 
+OpenCode retains the controller-projected GitHub broker environment through
+runner startup and provider startup. Shell operations acquire credentials for
+the active run through that broker. They do not require a persistent GitHub CLI
+login or inherit an ambient host broker capability.
+
 Without a managed identity, local commits can use an explicitly configured
 repository identity or `git -c user.name=... -c user.email=...`. The launcher
 leaves author/committer environment variables unset and requires configured

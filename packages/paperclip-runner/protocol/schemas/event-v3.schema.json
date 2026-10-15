@@ -172,7 +172,8 @@
         "run.terminal",
         "external_provider.dispatch_requested",
         "external_provider.operation_settled",
-        "external_provider.input_available"
+        "external_provider.input_available",
+        "auth.credentials.updated"
       ]
     },
     "schemaVersion": {
@@ -665,6 +666,28 @@
           }
         },
         "type": "object"
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "eventType": {
+            "const": "auth.credentials.updated"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "sourceKind": {
+            "const": "runner"
+          },
+          "priority": {
+            "const": 0
+          },
+          "payload": {
+            "$ref": "https://paperclip.dev/schemas/prp/v1/auth-credentials.schema.json"
+          }
+        }
       }
     }
   ],
