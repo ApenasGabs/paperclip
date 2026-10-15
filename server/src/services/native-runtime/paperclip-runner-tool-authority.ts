@@ -1,4 +1,5 @@
 import { skillAccessService } from "../skill-access.js";
+import { withExternalExecutionAdmission, type ExternalAdmissionTransaction } from "../../modules/external-agents/index.js";
 import { callTaskWorkspaceTool } from "../task-workspace-tools.js";
 import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
 import { RUNNER_BRIDGE_SCHEMAS, runnerBridgeDefinitions, readAssignedSkill, executeWorkspaceTool, readWorkspaceUploadFile, settleRunnerBridgeRead, assertRunnerWorkspacePathAllowed } from "./runner-bridge-tools.js";
@@ -166,7 +167,7 @@ type Binding = {
   /** Operator-approved Dot attachment access, pinned when the turn opens. */
   taskAttachmentRead?: boolean;
   runtimeContext?: NativeRuntimeContextSnapshot;
-  assertBridgeAuthority?: () => Promise<void>;
+  assertBridgeAuthority?: (database?: Db) => Promise<void>;
   executionTargetKind?: "local" | "remote";
   readRemoteWorkspaceFile?: RemoteWorkspaceFileReader;
   currentWakeComments?: CurrentWakeCommentsBinding;
@@ -2182,11 +2183,14 @@ export class PaperclipRunnerToolAuthority {
       ) => Promise<void>;
     } = {},
   ): Promise<unknown> {
-    return this.db.transaction(async (tx) => {
+    const mutate = async (tx: ExternalAdmissionTransaction) => {
       try {
         const context = await this.#lockAuthorizedMutationContext(
           tx as unknown as Db,
         );
+        if (this.binding.museRuntime && operationId === "write_document") {
+          await this.binding.assertBridgeAuthority?.(tx as unknown as Db);
+        }
         const isFilePreparation =
           operationId === "register_deliverable" ||
           operationId === REUSE_CHAT_ATTACHMENT_TOOL_NAME;
@@ -2273,7 +2277,10 @@ export class PaperclipRunnerToolAuthority {
         await options.onDefinitePreCommitFailure?.().catch(() => undefined);
         throw error;
       }
-    });
+    };
+    return this.db.transaction(tx => this.binding.museRuntime && operationId === "write_document"
+      ? withExternalExecutionAdmission(tx, this.binding.companyId, this.binding.agentId, this.binding.runId, () => mutate(tx))
+      : mutate(tx));
   }
 
   async #lockAuthorizedMutationContext(tx: Db): Promise<{

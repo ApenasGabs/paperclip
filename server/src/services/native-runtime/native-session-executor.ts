@@ -1657,9 +1657,9 @@ const initializingSessionToolAuthorities = new Set<string>();
 const executingRunnerdSessionScopes = new Map<string, string>();
 const executingNativeOwnerScopes = new Map<string, symbol>();
 
-async function assertExternalNativeRunAuthority(db: Db, execution: NativeExecutionInput): Promise<void> {
+async function assertExternalNativeRunAuthority(db: Db, execution: NativeExecutionInput, authorityDatabase: Db = db): Promise<void> {
   if (execution.schema === "paperclip.native-execution-input.v6") return dotRunnerBroker(db).assertRunAuthority(execution);
-  if (execution.schema === "paperclip.native-execution-input.v7") return museRunnerBroker(db).assertRunAuthority(execution);
+  if (execution.schema === "paperclip.native-execution-input.v7") return museRunnerBroker(db).assertRunAuthority(execution, authorityDatabase);
   throw new Error("external_native_execution_required");
 }
 
@@ -11526,7 +11526,7 @@ async function createRunnerdBackendWithinSessionClaim(
     museRuntime: input.execution.provider.kind === "muse",
     externalAuthorizingUserId: input.execution.provider.kind === "muse"
       ? await museRunnerBroker(input.db).authorizingUserIdForBinding(input.execution.provider.binding) : undefined,
-    assertBridgeAuthority: input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7" ? () => assertExternalNativeRunAuthority(input.db, input.execution) : undefined,
+    assertBridgeAuthority: input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7" ? (database = input.db) => assertExternalNativeRunAuthority(input.db, input.execution, database) : undefined,
     workspaceRoot: input.dotWorkspaceRoot ?? remoteTarget?.remoteCwd ?? input.execution.workspace.cwd ?? undefined,
     executionTargetKind: target.kind,
     readRemoteWorkspaceFile: remoteTarget && remoteCommandRunner
