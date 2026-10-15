@@ -32,6 +32,7 @@ import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compa
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { LOW_TRUST_QUARANTINED_BODY, buildLowTrustSourceTrust, buildPromotedSourceTrust, sanitizeQuarantinedCommentForHigherTrust } from "../services/source-trust.js";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
+import { documentService } from "../services/documents.js";
 import { assertNoExternalOverlap, withExternalAdmissionGuard } from "../modules/external-agents/index.js";
 import { digestPaperclipSemanticContent, externalOperationDigest, type ExternalProviderOperation } from "../vendor/paperclip-runner/index.js";
 
@@ -88,6 +89,76 @@ describe("personal Muse control plane",()=>{
     const [assignment]=await db.select().from(assignments).where(eq(assignments.runId,runId));
     return {...f,runId,issue,port,ref,assignment,sent,detach};
   }
+  it.each(["refresh_expired","muse_disabled","runner_disabled","grant_revoked","binding_revoked","assignment_fenced","qualification_expired","unchanged"] as const)("rechecks native Muse document authority after the real task-lock wait (%s)",async fault=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,write:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const checks:string[]=[],authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
+          await museRunnerBroker(database,{publicOrigin:oauthOrigin}).assertRunAuthority(execution);
+          checks.push(database===db?"discovery":"transaction");
+        }});
+      const idempotencyKey=randomUUID(),call={tool:"write_document",callId:randomUUID(),arguments:{key:"report",title:"Report",body:"MUSE_LOCK_WAIT_DOCUMENT_CANARY",baseRevisionId:null,idempotencyKey}};
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:issues.id}).from(issues).where(eq(issues.id,f.issue.id)).for("update");ready();await gate;
+      });
+      await locked;
+      write=authority.execute(call).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+          where waiter.datname=current_database() and waiter.wait_event_type='Lock' and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and waiter.query ~* '(from|join)[[:space:]]+"?issues"?' and waiter.query ~* 'for[[:space:]]+update') as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      expect(checks).toEqual(["discovery"]);
+      if(fault==="refresh_expired")await db.update(mcpOauthTokens).set({expiresAt:new Date(Date.now()-1)}).where(and(eq(mcpOauthTokens.grantId,f.binding.grantId!),eq(mcpOauthTokens.kind,"refresh")));
+      if(fault==="muse_disabled")await instanceSettingsService(db).updateExperimental({enableMuse:false});
+      if(fault==="runner_disabled")await instanceSettingsService(db).updateExperimental({enableNativeRunner:false});
+      if(fault==="grant_revoked")await db.update(mcpOauthGrants).set({revokedAt:new Date()}).where(eq(mcpOauthGrants.id,f.binding.grantId!));
+      if(fault==="binding_revoked")await db.update(bindings).set({revokedAt:new Date(),status:"revoked"}).where(eq(bindings.id,f.binding.id));
+      if(fault==="assignment_fenced")await db.update(assignments).set({status:"fenced"}).where(eq(assignments.id,f.assignment.id));
+      if(fault==="qualification_expired")await db.update(bindings).set({qualificationId:randomUUID(),qualificationExpiresAt:new Date(Date.now()-1)}).where(eq(bindings.id,f.binding.id));
+      if(fault==="unchanged")await expect(f.broker.assertRunAuthority(execution)).resolves.toBeUndefined();
+      else await expect(f.broker.assertRunAuthority(execution)).rejects.toMatchObject({status:403});
+      release();await holder;
+      const outcome=await write;
+      const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId));
+      const receipts=(run.resultJson as {semanticToolReceipts?:Record<string,unknown>}|null)?.semanticToolReceipts;
+      if(fault==="unchanged"){
+        expect(outcome.error).toBeUndefined();expect(outcome.result).toMatchObject({disposition:"applied",document:{body:call.arguments.body}});
+        expect(receipts?.[idempotencyKey]).toMatchObject({operationId:"write_document",input:call.arguments,result:outcome.result});
+        expect(await documentService(db).getIssueDocumentByKey(f.issue.id,"report")).toMatchObject({body:call.arguments.body});
+        expect(await authority.execute({...call,callId:randomUUID()})).toEqual(outcome.result);
+        expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);
+      }else{
+        expect(outcome.error).toMatchObject({status:403});expect(outcome.result).toBeUndefined();
+        expect(await db.select({id:issueDocuments.id}).from(issueDocuments).where(eq(issueDocuments.issueId,f.issue.id))).toEqual([]);
+        expect(await db.select({id:documents.id}).from(documents).where(eq(documents.companyId,f.company.id))).toEqual([]);
+        expect(receipts?.[idempotencyKey]).toBeUndefined();
+        expect(await db.select({id:activityLog.id}).from(activityLog).where(and(eq(activityLog.companyId,f.company.id),eq(activityLog.action,"issue.document_created")))).toEqual([]);
+      }
+      expect(run.status).toBe("running");
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+    }finally{release();await holder;await write;await instanceSettingsService(db).updateExperimental({enableMuse:true,enableNativeRunner:true});await f.detach();}
+  });
+  it("preserves the ordinary non-Muse document receipt path without invoking Muse authority",async()=>{
+    const f=await active();try{
+      await db.update(agents).set({adapterConfig:{provider:"codex"}}).where(eq(agents.id,f.agent.id));
+      await db.update(heartbeatRuns).set({driverKind:"codex_app_server"}).where(eq(heartbeatRuns.id,f.runId));
+      const assertBridgeAuthority=vi.fn(async()=>{throw new Error("Muse authority must not guard this ordinary native binding");});
+      const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,assertBridgeAuthority});
+      const call={tool:"write_document",callId:randomUUID(),arguments:{key:"report",title:"Report",body:"Ordinary native document",baseRevisionId:null,idempotencyKey:randomUUID()}};
+      const result=await authority.execute(call);expect(result).toMatchObject({disposition:"applied",document:{body:call.arguments.body}});
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(result);
+      expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);expect(assertBridgeAuthority).not.toHaveBeenCalled();
+    }finally{await f.detach();}
+  });
   async function detectorCleanupFixture(provided?:Awaited<ReturnType<typeof oauthFixture>>) {
     const f=provided??await oauthFixture(true),qualificationId=randomUUID(),expiresAt=new Date(Date.now()-60_000);
     await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
