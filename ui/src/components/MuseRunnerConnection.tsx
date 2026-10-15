@@ -15,6 +15,7 @@ export interface MuseConnectionDetailsProps {
   pairing?: MusePairing | null;
   busy?: boolean;
   error?: string;
+  offline?: boolean;
   onTest: () => void;
   onRepair: () => void;
   onPause: () => void;
@@ -24,7 +25,7 @@ export interface MuseConnectionDetailsProps {
 }
 
 /** The settings view uses the same connection evidence as the invitation. */
-export function MuseConnectionDetails({ connection, pairing, busy, error, onTest, onRepair, onPause, onDisconnect, onRefresh, onAttest }: MuseConnectionDetailsProps) {
+export function MuseConnectionDetails({ connection, pairing, busy, error, offline = false, onTest, onRepair, onPause, onDisconnect, onRefresh, onAttest }: MuseConnectionDetailsProps) {
   const b = connection.binding;
   const [attestation, setAttestation] = useState<MuseAttestStopInput | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -32,9 +33,9 @@ export function MuseConnectionDetails({ connection, pairing, busy, error, onTest
   const stopBindingRevision = b?.stop.bindingRevision;
   useEffect(() => { setAttestation(null); setConfirmed(false); }, [boundaryIdentity, stopBindingRevision]);
   const live = !!b && b.status !== "revoked";
-  const state = useMuseConnectionState(connection);
+  const state = useMuseConnectionState(connection, { offline });
   const testing = state.testing;
-  const configure = connection.enabled && connection.canConfigureConnection && !!connection.publicOrigin;
+  const configure = !offline && connection.enabled && connection.canConfigureConnection && !!connection.publicOrigin;
   const timestamp = (value: string | null) => value ? formatDateTime(value, { includeSeconds: true }) : "Not observed";
   return <div className="space-y-4">
     <p className="text-sm text-muted-foreground">Muse uses its own tools and permissions. Paperclip coordinates company tasks and questions. Provider usage and cost are unavailable.</p>
@@ -115,7 +116,7 @@ export function MuseRunnerConnection({ companyId, agentId }: { companyId?: strin
   const error = muse.state.error ?? muse.pair.error ?? muse.verify.error ?? muse.revoke.error ?? muse.attest.error ?? pause.error;
   if (muse.identity.failed) return <div className="space-y-3"><p role="alert" className="text-sm text-destructive">Unable to confirm your account. Refresh to inspect this Muse connection.</p><Button type="button" variant="outline" onClick={() => { void cache.invalidateQueries({ queryKey: queryKeys.auth.session }); }}>Refresh</Button></div>;
   if (!muse.state.data) return <div className="space-y-3"><p role="status" className="text-sm text-muted-foreground">{muse.state.error ? "Unable to load the Muse connection." : "Loading Muse connection…"}</p>{error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}<Button type="button" variant="outline" onClick={() => { void muse.state.refetch(); }}>Refresh</Button></div>;
-  return <MuseConnectionDetails connection={muse.state.data} pairing={muse.pairing}
+  return <MuseConnectionDetails connection={muse.state.data} pairing={muse.pairing} offline={muse.state.isError}
     busy={muse.pair.isPending || muse.verify.isPending || muse.revoke.isPending || muse.attest.isPending || pause.isPending}
     error={error?.message} onTest={() => { if (muse.binding) muse.verify.mutate(muse.binding); }} onRepair={muse.repair}
     onPause={() => pause.mutate()} onDisconnect={() => { if (muse.binding) muse.revoke.mutate(muse.binding); }}

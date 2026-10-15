@@ -216,3 +216,29 @@ it("does not reuse historical readiness after the authenticated connection expir
   expect(container.textContent).toContain("This Muse connection expired. Reconnect Muse with a fresh setup prompt.");
   expect(container.textContent).not.toContain("Muse is ready for tasks");
 });
+
+
+it("withdraws cached readiness after a failed update and restores it only after refresh", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T15:00:00Z"));
+  const ready: MuseConnection = { ...museConnection, agentLifecycleState: "ready", binding: { ...museConnection.binding!,
+    status: "ready", backgroundReplyVerified: true, lastVerifiedReplyAt: "2026-10-15T14:59:00Z" } };
+  const load = vi.spyOn(museInvitationsApi, "connection").mockResolvedValue(ready);
+  await renderRunner();
+  expect(container.textContent).toContain("Muse is ready for tasks");
+  const priorReply = lastVerifiedReply();
+  load.mockRejectedValueOnce(new Error("Synthetic connection update failed"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(5030); });
+  expect(container.textContent).toContain("Connection updates paused. Refresh to check the latest evidence.");
+  expect(container.textContent).not.toContain("Muse is ready for tasks");
+  expect(container.textContent).toContain("Synthetic connection update failed");
+  expect(lastVerifiedReply()).toBe(priorReply);
+  expect(button("Test background reply").disabled).toBe(true);
+  expect(button("Repair connection").disabled).toBe(true);
+  expect(button("Disconnect").disabled).toBe(false);
+  expect(button("Refresh").disabled).toBe(false);
+  await act(async () => button("Refresh").click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(30); });
+  expect(container.textContent).toContain("Muse is ready for tasks");
+  expect(container.textContent).not.toContain("Connection updates paused");
+  expect(button("Test background reply").disabled).toBe(false);
+});
