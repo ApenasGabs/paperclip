@@ -10,7 +10,7 @@ import { authorizationService } from "../authorization.js";
 import { issueService } from "../issues.js";
 import { prepareExternalDeliverablePublication, readExternalDeliverablePublication } from "../native-runtime/external-deliverable-publication.js";
 import { logActivity } from "../activity-log.js";
-import { hashMcpSecret, type PublicMcpOAuth, type McpPrincipal } from "./oauth.js";
+import { hashMcpSecret, McpOAuthError, type PublicMcpOAuth, type McpPrincipal } from "./oauth.js";
 import { McpCapabilityError, company, task, requestId, pick, object, stable, type ApiDispatch, type Capability } from "./contracts.js";
 
 const lifetime = 10 * 60_000;
@@ -35,7 +35,16 @@ export function createPublicMcpTransfers(db: Db, oauth: PublicMcpOAuth, api: Api
   async function workSession(p: McpPrincipal, sessionId: string | undefined, taskId: string, write: boolean, queryDb?: Db) {
     if (p.grant.purpose !== "agent") { if (sessionId || options.agentSession) throw unavailable(); return null; }
     if (!sessionId || !options.agentSession) throw unavailable();
-    return options.agentSession.authorize(p, sessionId, taskId, write, queryDb);
+    try {
+      return await options.agentSession.authorize(p, sessionId, taskId, write, queryDb);
+    } catch (error) {
+      if (error instanceof McpOAuthError && error.code === "access_denied" && error.status === 409) {
+        const workModeDenial = "This task's work mode does not permit deliverable uploads.";
+        if (error.message === workModeDenial) throw new McpCapabilityError(workModeDenial);
+        throw unavailable();
+      }
+      throw error;
+    }
   }
   const svc = issueService(db);
   async function taskAccess(p: McpPrincipal, taskId: string, write = false, queryDb?: Db, sessionId?: string) {
