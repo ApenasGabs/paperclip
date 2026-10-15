@@ -1,4 +1,5 @@
 import { heartbeatExternalProvider, nativeRuntimeHasInstructionFilesystem } from "./heartbeat/external-provider.js";
+import { dotRunnerBroker } from "./dot-runner-broker.js";
 import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase } from "./execution-preparation-timing.js";
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
 import { createHeartbeatInstructionCopyRelease, createHeartbeatInstructionWorkingCopy } from "./heartbeat/instruction-working-copy.js";
@@ -1205,6 +1206,13 @@ export function heartbeatService(
   });
 
   const heartbeatQueue = createHeartbeatQueue(db, {
+    canStartNewExternalBotWork: async agent => {
+      if (agent.adapterType !== "paperclip_runner" || agent.adapterConfig.provider !== "grok_bot") return true;
+      const aiConnection = aiRuntimeConnectionBindingSchema.safeParse(agent.runtimeConfig?.aiConnection);
+      if (aiConnection.success && aiConnection.data.mode === "router") return true;
+      return dotRunnerBroker(db).canStartNewWork(agent.companyId, agent.id,
+        readNonEmptyString(agent.adapterConfig.externalBindingId) ?? "");
+    },
     applyWakeQueuePostCommitEffects,
     setRunStatus,
     setWakeupStatus,
