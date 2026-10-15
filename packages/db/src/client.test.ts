@@ -211,12 +211,18 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
     for (const entry of entries) {
       const content = await fs.promises.readFile(new URL(`./migrations/${entry.file}`, import.meta.url), "utf8");
       expect(createHash("sha256").update(content).digest("hex")).toBe(entry.hash);
-      for (const statement of content.split("--> statement-breakpoint")) {
-        if (!statement.trim()) continue;
-        await sql.unsafe(statement.replace(/^(\s*ALTER TABLE "[^"]+" DROP CONSTRAINT) (?!IF EXISTS\b)/i, "$1 IF EXISTS "));
-      }
       createdAt = Math.max(createdAt + 1, entry.when);
-      await sql`INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES (${entry.hash}, ${createdAt})`;
+      const applyMigration = async (executor: Pick<ReturnType<typeof postgres>, "unsafe">) => {
+        for (const statement of content.split("--> statement-breakpoint")) {
+          if (!statement.trim()) continue;
+          await executor.unsafe(statement.replace(/^(\s*ALTER TABLE "[^"]+" DROP CONSTRAINT) (?!IF EXISTS\b)/i, "$1 IF EXISTS "));
+        }
+        await executor.unsafe("INSERT INTO drizzle.__drizzle_migrations (hash, created_at) VALUES ($1, $2)", [entry.hash, createdAt]);
+      };
+      const requiresTopLevel = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\s+CONCURRENTLY\b/i.test(content)
+        || /^\s*COMMIT\s*;/im.test(content);
+      if (requiresTopLevel) await applyMigration(sql);
+      else await sql.begin(async transaction => { await applyMigration(transaction); });
     }
   }
 
