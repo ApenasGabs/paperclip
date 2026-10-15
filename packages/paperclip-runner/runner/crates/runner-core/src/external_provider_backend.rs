@@ -447,7 +447,10 @@ impl ExternalCommandExecutor {
             let saved_codec = state.codec()?;
             if saved_codec != self.codec
                 && !(self.recover_external_bot
-                    && matches!(saved_codec, ExternalProviderCodec::Dot | ExternalProviderCodec::Grok))
+                    && matches!(
+                        saved_codec,
+                        ExternalProviderCodec::Dot | ExternalProviderCodec::Grok
+                    ))
             {
                 return Err(invalid("external checkpoint provider mismatch"));
             }
