@@ -134,8 +134,8 @@ describe("Copilot build-owned installation", () => {
     expect(verifyNativeAcpxInstallation).not.toHaveBeenCalled();
   });
 
-  it("binds the combined external-provider schema in a new v19 declaration", async () => {
-    const current = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v19-identity.json", import.meta.url), "utf8"));
+  it("preserves the historical combined external-provider v19 declaration without granting current launch", async () => {
+    const current = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v19-muse-historical-identity.json", import.meta.url), "utf8"));
     expect(current.declaration.agentProfileVersion).toBe(19);
     expect(isSupportedAcpxProfileVersion("copilot", 18)).toBe(true);
     vi.mocked(verifyNativeAcpxInstallation).mockClear();
@@ -158,8 +158,44 @@ describe("Copilot build-owned installation", () => {
     expect(verifyNativeAcpxInstallation).not.toHaveBeenCalled();
   });
 
-  it("admits the current v19 declaration and binds its source policy, receipts and patch hashes", () => {
-    const identity = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v19-identity.json", import.meta.url), "utf8"));
+  it("preserves v18 history while binding the credential update protocol sources", () => {
+    const prior = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v18-identity.json", import.meta.url), "utf8"));
+    const current = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v19-identity.json", import.meta.url), "utf8"));
+    expect(Object.keys(current.declaration).filter(key => current.declaration[key] !== prior.declaration[key]).sort())
+      .toEqual(["agentProfileVersion", "semanticSchemaBundleSourceSha256", "semanticValidationSourceSha256", "semanticValidatorsSourceSha256"]);
+    expect(Object.keys(current.declaration).sort()).toEqual(Object.keys(prior.declaration).sort());
+    expect(current.commandDigest).not.toBe(prior.commandDigest);
+    expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBe("pending");
+  });
+  it("binds both immutable v19 histories in a new combined v20 declaration", async () => {
+    const current = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v20-identity.json", import.meta.url), "utf8"));
+    expect(current.declaration.agentProfileVersion).toBe(20);
+    expect(isSupportedAcpxProfileVersion("copilot", 19)).toBe(true);
+    vi.mocked(verifyNativeAcpxInstallation).mockClear();
+    for (const [name, changed] of [
+      ["copilot-profile-v19-identity.json", ["agentProfileVersion", "semanticSchemaBundleSourceSha256", "semanticValidatorsSourceSha256"]],
+      ["copilot-profile-v19-muse-historical-identity.json", ["agentProfileVersion", "semanticSchemaBundleSourceSha256", "semanticValidationSourceSha256", "semanticValidatorsSourceSha256"]],
+    ] as const) {
+      const prior = JSON.parse(readFileSync(new URL(`../../../test/fixtures/${name}`, import.meta.url), "utf8"));
+      expect(Object.keys(current.declaration).filter(key => current.declaration[key] !== prior.declaration[key]).sort()).toEqual(changed);
+      expect(Object.keys(current.declaration).sort()).toEqual(Object.keys(prior.declaration).sort());
+      const sortedPrior = Object.fromEntries(Object.entries(prior.declaration).sort(([a], [b]) => a.localeCompare(b)));
+      expect(`sha256:${createHash("sha256").update(JSON.stringify(sortedPrior)).digest("hex")}`).toBe(prior.commandDigest);
+      expect(current.commandDigest).not.toBe(prior.commandDigest);
+      for (const override of [
+        { commandDigest: prior.commandDigest },
+        { agentProfileVersion: prior.declaration.agentProfileVersion },
+        { commandDigest: prior.commandDigest, agentProfileVersion: prior.declaration.agentProfileVersion },
+      ]) {
+        await expect(verifyCopilotInstallation({ ...QUALIFIED_ACPX_PROFILES.copilot, ...override })).rejects.toThrow("exact pinned");
+      }
+    }
+    expect(verifyNativeAcpxInstallation).not.toHaveBeenCalled();
+    expect(QUALIFIED_ACPX_PROFILES.copilot.qualificationStatus).toBe("pending");
+  });
+
+  it("admits the current v20 declaration and binds its source policy, receipts and patch hashes", () => {
+    const identity = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v20-identity.json", import.meta.url), "utf8"));
     expect(identity.declaration.systemInstructionDelivery).toBe(COPILOT_SYSTEM_INSTRUCTION_DELIVERY);
     expect(identity.declaration.sharedRuntimeContract).toBe("paperclip.acpx-runtime-contract.v1");
     expect(identity.declaration.permissionContextContract).toBe(COPILOT_PERMISSION_CONTEXT_CONTRACT);
@@ -190,7 +226,7 @@ describe("Copilot build-owned installation", () => {
     expect([...closure].filter(path => !bound.has(path))).toEqual(["negative-control:unbound-policy"]);
   });
   it.each([...PERMISSION_POLICY_SOURCES, ...SEMANTIC_RECEIPT_SOURCES])("changing %s changes the candidate identity", (_path, field) => {
-    const identity = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v19-identity.json", import.meta.url), "utf8"));
+    const identity = JSON.parse(readFileSync(new URL("../../../test/fixtures/copilot-profile-v20-identity.json", import.meta.url), "utf8"));
     identity.declaration[field] = "0".repeat(64);
     const sorted = Object.fromEntries(Object.entries(identity.declaration).sort(([a], [b]) => a.localeCompare(b)));
     expect(`sha256:${createHash("sha256").update(JSON.stringify(sorted)).digest("hex")}`).not.toBe(identity.commandDigest);
@@ -236,7 +272,7 @@ describe("Copilot build-owned installation", () => {
   }));
   it("rejects changed profile identities before native file access", async () => {
     vi.mocked(verifyNativeAcpxInstallation).mockClear();
-    for (const override of [{ agentServerVersion: "latest" }, { commandDigest: "sha256:untrusted" }, { commandDigest: "sha256:ed39259990cb0efda48d6105d2fa3599aac76873eb75cd80b4d0b179ce0579a6" }, { agent: "cursor" }, { agentProfileVersion: 1 }, { agentProfileVersion: 2 }, { agentProfileVersion: 3 }, { agentProfileVersion: 4 }, { agentProfileVersion: 5 }, { agentProfileVersion: 6 }, { agentProfileVersion: 7 }, { agentProfileVersion: 8 }, { agentProfileVersion: 9 }, { agentProfileVersion: 10 }, { agentProfileVersion: 17 }, { agentProfileVersion: 18 }]) {
+    for (const override of [{ agentServerVersion: "latest" }, { commandDigest: "sha256:untrusted" }, { commandDigest: "sha256:ed39259990cb0efda48d6105d2fa3599aac76873eb75cd80b4d0b179ce0579a6" }, { agent: "cursor" }, { agentProfileVersion: 1 }, { agentProfileVersion: 2 }, { agentProfileVersion: 3 }, { agentProfileVersion: 4 }, { agentProfileVersion: 5 }, { agentProfileVersion: 6 }, { agentProfileVersion: 7 }, { agentProfileVersion: 8 }, { agentProfileVersion: 9 }, { agentProfileVersion: 10 }, { agentProfileVersion: 17 }, { agentProfileVersion: 18 }, { agentProfileVersion: 19 }]) {
       await expect(verifyCopilotInstallation({ ...QUALIFIED_ACPX_PROFILES.copilot, ...override } as never)).rejects.toThrow("exact pinned");
     }
     expect(verifyNativeAcpxInstallation).not.toHaveBeenCalled();
