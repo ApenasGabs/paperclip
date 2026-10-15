@@ -254,10 +254,22 @@ attempt or owning phase:
 | `workspace.sources.*` | Source inventory queries, canonicalization, one filesystem alias scan, repository scan, and configured project scan. |
 | `workspace.readers`, `workspace.readers.*`, `workspace.access.*` | Retained-reader groups, identity, trust, project and source authorization, privacy and inventory reads. |
 | `workspace.provenance`, `workspace.notification`, `workspace.write` | Preserved ownership, notification statements, and record writes. |
+| `workspace.materialize.*`, `workspace.checkout.*` | Private source-directory setup and identity verification, existing checkout lookup, Git credential resolution, clone, requested-ref checkout, and atomic publication. The enclosing `heartbeat.prepare.workspace_source_materialize` includes the complete source-materialization path. |
 | `runtime_selection.*` | Completion contracts, session/recovery reads, profiles, interaction materialization, backend discovery, bootstrap, run/coordinator writes, transaction entry/settlement, and workspace synchronization. |
 | `runtime_context.instructions`, `.skills`, `.mcp` | The three concurrent runtime-context branches. Their durations overlap. |
 | `runtime_context.asset_*` | Source reads, manifest hashing, cache lookup, cold materialization, and exact file verification on cold and warm paths. |
-| `workspace_sync.*` | Existing Git and baseline snapshot, pack, seed verification, transfer, and restore operations. Pack and verification can be inside transfer; do not add nested durations. |
+| `workspace_sync.prepare_host_current`, `.prepare_durable_seed`, `.prepare_adopt_remote` | Runtime preparation under the selected inbound mode, including snapshot and staging work. A warm mismatch may produce a second preparation; it is real repeated work. |
+| `workspace_sync.source_root`, `.repositories`, `.ignore_rules`, `.snapshot_git`, `.snapshot_baseline` | Physical source capture, managed repositories, ignore rules, Git metadata and baseline content snapshot. |
+| `workspace_sync.pack`, `.git_clone`, `.git_archive`, `.overlay_copy`, `.overlay_archive`, `.deleted_manifest` | Temporary shallow Git clone, its archive callback, selected working-tree overlay copy/archive, and the deleted-file manifest. The archive is inside the clone's lifetime; do not sum parent and child. |
+| `workspace_sync.seed_generation`, `.seed_lookup`, `.seed_replay`, `.seed_persist`, `.seed_publish`, `.seed_verify`, `.seed_extract`, `.seed_snapshot`, `.seed_cleanup` | Seed identity, cache lookup, replay, durable copies, publication, extraction/re-snapshot verification and temporary cleanup. Cache hits omit cold clone and verification work. |
+| `workspace_sync.inbound_barrier`, `.stage_workspace`, `.transfer` | The inbound scheduler barrier, whole workspace task, and provider `syncIn` call (including provider guards, upload and post-upload extraction). Parallel tasks overlap; provider transfer/exec children give the finer transport split when available. |
+| `workspace_sync.progress` | Awaited progress/status reporting, including the existing lifecycle run-log writes. These are not file transfer work. |
+| `workspace_sync.run_read`, `.descriptor_directory`, `.descriptor_read`, `.archive_hash`, `.warm_stamp`, `.durable_seed_verify`, `.manifests_persist`, `.descriptor_write`, `.reference_write` | Saved run state, recovery descriptors, archive hashing, remote warm-stamp check, manifests and final descriptor/reference persistence. |
+| `connectors.browser_use.resolve`, `connectors.speko.resolve`, `connectors.slack.resolve`, `connectors.agentmail.resolve` | Each sequential connector resource resolver beneath configuration or native-controller assignment resolution. Empty/denied assignments still have measurable work. |
+| `connectors.browser_use.connection`, `.catalog`, `.grant` | Browser Use candidate reads, the full authorized catalog listing currently used to discover Browser Use resources, and grant checks. The catalog can contain work for other connectors. |
+| `connectors.discovery.scheduled`, `.queue`, `.build`, `.agent`, `.connections`, `.github`, `.slack`, `.speko`, `.policy`, `.on_demand_policy` | Discovery scheduler lifetime and wait, catalog construction, agent validation, descriptor sources, and policy decisions. Queued work retains the initiating run's trace context even when another run releases the scheduler slot. |
+| `connectors.slack.candidates`, `.authority`, `.profile`, `.settings`, `.identity`, `.credentials`, `.revision` | Slack endpoint enumeration, authority revalidation, enabled profile, settings, accepted requester provenance, credential reads and authorization revision. |
+| `connectors.slack.authority.transaction*`, `connectors.slack.catalog.transaction*`, `connectors.slack.catalog.lock`, `.entries`, `.write`, `.profile` | Slack authority and catalog transaction entry/settlement, advisory lock, catalog reads/updates and existing-profile lookup. Entry combines pool acquisition and BEGIN; it does not isolate pool wait. |
 | `execution.runtime` | Runtime dispatch, usage, workspace finalization and runtime cleanup; this includes work after provider execution. |
 | `execution.workspace_finalize` | Best-effort native workspace finalization, including restore recovery, copyback and commit. Its nested restore and commit spans measure distinct steps. |
 | `execution.workspace_ownership`, `.workspace_ownership_wait`, `.workspace_restore`, `.workspace_commit`, `.native_finalize` | Ownership coordination including its action, acquisition before the action, copyback, final snapshot/stamp/descriptor persistence, and native settlement. |
@@ -282,6 +294,40 @@ notification call. None establishes browser paint or external delivery. The atte
 can continue through later bookkeeping and resource cleanup. A later recovery
 invocation has its own attempt; this does not manufacture one continuous trace
 across queueing, process restarts, or an unavailable controller.
+
+### Reading a slow startup in Honeycomb
+
+Filter `paperclip.task.run.run_id` to the first 12 hex characters of
+`SHA256(run UUID)`, then inspect the attempt's waterfall with its
+`service.version`. An agent/model setting or the repository's checked-out commit
+does not establish the server revision. The detailed spans are available only
+after this instrumentation is deployed; an earlier aggregate cannot establish
+which child was slow.
+
+Start beneath `heartbeat.prepare.workspace` with source materialization versus
+provisioning, repository admission, and environment acquisition/realization.
+Source materialization now separates filesystem setup, credential resolution,
+Git cloning and source identity checks. Under
+`runtime_selection.workspace_sync`, compare snapshot work, the seed-cache path,
+archive construction/verification, provider transfer and descriptor persistence.
+Use span start/end times to identify serial work and uncovered gaps; summing
+nested or concurrent durations overstates elapsed time.
+
+For connector delay, compare the four `connectors.*.resolve` spans beneath each
+assignment-resolution parent. A long Browser Use `.catalog` can be discovery
+queueing, connection descriptors, another connector's authority checks, or policy
+evaluation. A long Slack transaction entry, lock or credential span calls for a
+different investigation. Configuration and native backend setup currently resolve
+assignments separately; the trace records both without caching authorization or
+changing access decisions.
+
+New workspace detail callbacks have fixed names and remain trace-only. They do
+not create additional lifecycle events or awaited run-log writes. Existing coarse
+progress writes remain intact and appear under `workspace_sync.progress`, so
+reporting overhead is visible alongside useful work. No per-file spans, paths,
+repository URLs, connector resource IDs, tool schemas, credentials or exception
+messages are added to the export. The endpoint gate and per-phase span limit
+above still apply.
 
 
 ## Native Runner Trace Spans
