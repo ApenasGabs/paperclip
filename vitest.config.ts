@@ -1,9 +1,17 @@
 import { configDefaults, defineConfig } from "vitest/config";
 
+const omitWorkspacesGithubAnnotations = process.env.GITHUB_ACTIONS === "true"
+  && process.env.GITHUB_WORKFLOW === "PR"
+  && process.env.PAPERCLIP_CI_PROFILE_JOB === "General tests (workspaces-b)";
+const profileEnabled = process.env.PAPERCLIP_CI_PROFILE === "true";
+
 export default defineConfig({
   test: {
-    ...(process.env.PAPERCLIP_CI_PROFILE === "true"
-      ? { reporters: [...configDefaults.reporters, "./scripts/ci-profile/vitest-reporter.mjs"] }
+    ...(omitWorkspacesGithubAnnotations || profileEnabled
+      ? { reporters: [
+        ...configDefaults.reporters.filter(reporter => !omitWorkspacesGithubAnnotations || reporter !== "github-actions"),
+        ...(profileEnabled ? ["./scripts/ci-profile/vitest-reporter.mjs"] : []),
+      ] }
       : {}),
     projects: [
       "packages/shared",
