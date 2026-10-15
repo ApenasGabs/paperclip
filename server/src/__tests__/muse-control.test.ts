@@ -27,6 +27,8 @@ import { errorHandler } from "../middleware/error-handler.js";
 import { museRunnerBroker } from "../services/muse-runner-broker.js";
 import { museReceiver } from "../services/muse-receiver.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
+import { boardAuthService } from "../services/board-auth.js";
+import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { LOW_TRUST_QUARANTINED_BODY, buildLowTrustSourceTrust, buildPromotedSourceTrust, sanitizeQuarantinedCommentForHigherTrust } from "../services/source-trust.js";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
@@ -88,12 +90,16 @@ describe("personal Muse control plane",()=>{
   }
   async function detectorCleanupFixture(provided?:Awaited<ReturnType<typeof oauthFixture>>) {
     const f=provided??await oauthFixture(true),qualificationId=randomUUID(),expiresAt=new Date(Date.now()-60_000);
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
     await db.update(bindings).set({qualificationId,qualificationStartedAt:new Date(expiresAt.getTime()-86_400_000),qualificationExpiresAt:expiresAt}).where(eq(bindings.id,f.binding.id));
     await f.broker.endQualification({companyId:f.company.id,agentId:f.agent.id,bindingId:f.binding.id,qualificationId,operatorId:f.operatorId});
     const [binding]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));
     const input={bindingId:binding.id,generation:binding.generation,expectedRevision:binding.revision,qualificationId,hookScript:`~/hooks/scripts/paperclip-muse-${binding.id}.sh`,detectorRemoved:true as const,
       observation:{method:"hooks.list" as const,includeDisabled:true as const,hookId:"paperclip-synthetic-hook",outcome:"exact_hook_absent" as const,observedAt:new Date().toISOString(),sha256:"d".repeat(64)}};
-    const app=express();app.use(express.json());app.use((req,_res,next)=>{Object.assign(req,{actor:{type:"board",source:"session",userId:f.operatorId,companyIds:[f.company.id]}});next();});app.use(museBoardRoutes(db,oauthOrigin));app.use(activityRoutes(db));app.use(errorHandler);
+    const app=express();app.use(express.json());app.use(async(req,_res,next)=>{
+      const access=await boardAuthService(db).resolveBoardAccess(f.operatorId);
+      Object.assign(req,{actor:{type:"board",source:"session",userId:access.user?.id,userName:access.user?.name??null,userEmail:access.user?.email??null,companyIds:access.companyIds,memberships:access.memberships,isInstanceAdmin:access.isInstanceAdmin}});next();
+    });app.use(museBoardRoutes(db,oauthOrigin));app.use(activityRoutes(db));app.use(errorHandler);
     const path=`/companies/${f.company.id}/agents/${f.agent.id}/muse-binding/attest-detector-cleanup`;
     return {...f,binding,input,app,path};
   }
@@ -139,7 +145,7 @@ describe("personal Muse control plane",()=>{
   it("does not clear claimed-worker or unknown-native-effect holds when recording detector removal",async()=>{
     const activeRun=await active(await oauthFixture(true));
     try {
-      await activeRun.broker.act(activeRun.subject,{version:1,command:"assignment.claim",assignmentId:activeRun.assignment.id,requestId:randomUUID()});
+      expect((await activeRun.broker.act(activeRun.subject,{version:1,command:"accept",assignmentId:activeRun.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
       const f=await detectorCleanupFixture(activeRun);
       await db.update(externalAgentHolds).set({nativeEffectsUnknown:true}).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));
       const before=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));expect(before).toHaveLength(1);expect(before[0]).toMatchObject({workerUnknown:true,nativeEffectsUnknown:true,releasedAt:null});
