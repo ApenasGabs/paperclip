@@ -1519,6 +1519,10 @@ runnerd recovery, and durable control-plane readers. These paths synchronously
 read and parse the full JSON file, so memory use and parse time grow with file
 size. Remote checkpoint archive and expanded-size limits remain 64 MiB.
 
+Sparse remote workspace checkpoints capture at most eight regular files at once.
+Each file retains the content hash and mutation checks. A failed capture settles
+its active readers before closing the manifest and publishes no success receipt.
+
 ### Warm sandbox continuity
 
 Healthy native warm turns retain their runner and provider processes. After a

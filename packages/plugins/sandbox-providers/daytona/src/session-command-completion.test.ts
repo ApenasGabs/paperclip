@@ -62,6 +62,20 @@ describe("Daytona completed session commands", () => {
     expect(process.getSessionCommandLogs.mock.calls.filter(call => call[2])).toHaveLength(1);
   });
 
+  it("retains a completed status response that takes 300ms without opening a follow socket", async () => {
+    const { process, execute } = fixture();
+    process.getSessionCommand.mockImplementationOnce(() => new Promise(resolve => setTimeout(() => resolve({ exitCode: 0 }), 300)));
+    let settled = false;
+    const pending = execute().then(result => { settled = true; return result; });
+    await vi.advanceTimersByTimeAsync(600);
+    const settledWithinObservation = settled;
+    if (!settled) await vi.advanceTimersByTimeAsync(1_500);
+    expect(await pending).toMatchObject({ exitCode: 0, timedOut: false, stdout: "complete stdout\n", stderr: "complete stderr\n" });
+    expect(settledWithinObservation).toBe(true);
+    expect(process.getSessionCommandLogs.mock.calls.filter(call => call[2])).toHaveLength(0);
+    expect(process.executeSessionCommand).toHaveBeenCalledTimes(1);
+  });
+
   it("bounds an unavailable initial status read and retains the working stream", async () => {
     const { process, execute } = fixture();
     process.getSessionCommand.mockImplementationOnce(() => new Promise(() => {}));
@@ -70,7 +84,9 @@ describe("Daytona completed session commands", () => {
       return { stdout: "complete stdout\n", stderr: "complete stderr\n" };
     });
     const pending = execute();
-    await vi.advanceTimersByTimeAsync(300);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(process.getSessionCommandLogs).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(2);
     expect(await pending).toMatchObject({ exitCode: 0, timedOut: false, stdout: "complete stdout\n", stderr: "complete stderr\n" });
     expect(process.getSessionCommandLogs.mock.calls.filter(call => call[2])).toHaveLength(1);
   });

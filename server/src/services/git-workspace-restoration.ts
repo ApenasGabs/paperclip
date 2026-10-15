@@ -134,8 +134,15 @@ async function stockGitFiles() {
 
 export async function assertReproducibleBaseGitStorage(cwd: string, signal?: AbortSignal) {
   const root = path.join(cwd, ".git");
-  const allowed = new Set(["HEAD", "ORIG_HEAD", "FETCH_HEAD", "index", "config", "description", "hooks", "info", "refs", "objects", "logs", "packed-refs", "worktrees"]);
+  const allowed = new Set(["HEAD", "ORIG_HEAD", "FETCH_HEAD", "index", "config", "description", "hooks", "info", "refs", "objects", "logs", "packed-refs", "worktrees", "branches"]);
   if ((await fs.readdir(root)).some(name => !allowed.has(name))) throw new Error("unknown_base_git_files");
+  const branches = path.join(root, "branches");
+  const branchesStat = await fs.lstat(branches).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (branchesStat && (!branchesStat.isDirectory() || branchesStat.isSymbolicLink()
+    || (await fs.readdir(branches)).length > 0)) throw new Error("custom_git_metadata");
   const templates = await stockGitFiles();
   for (const directory of ["hooks", "info"]) {
     for (const name of await fs.readdir(path.join(root, directory))) {

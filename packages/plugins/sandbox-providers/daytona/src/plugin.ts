@@ -1808,7 +1808,7 @@ async function executeOneShot(
 // Fallback reads full log snapshots as well as status. Limit the heavier
 // polling path while keeping output available to interactive commands.
 const SESSION_LOG_POLL_INTERVAL_MS = 1000;
-const SESSION_INITIAL_STATUS_TIMEOUT_MS = 250;
+const SESSION_INITIAL_STATUS_TIMEOUT_MS = 500;
 // A socket can stay open after it stops delivering output. Switch to saved
 // logs after this much silence; silence never proves that the command exited.
 const SESSION_LOG_STREAM_IDLE_MS = 15_000;

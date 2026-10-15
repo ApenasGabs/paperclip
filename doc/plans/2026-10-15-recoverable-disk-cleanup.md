@@ -33,95 +33,92 @@ Each slice gets focused tests, required repository checks, review, single-worksp
 deployment at an exact SHA, dry-run inspection, measured reclamation, and ordinary
 product acceptance. Rollback disables deletion and retains restoration support.
 
-## Current state
+## Current state (2026-10-15, 19:27 UTC)
 
-- User authorized merging every PR from this effort after checks pass.
-- Skill [PR #16433](https://github.com/paperclipai/paperclip/pull/16433) merged
-  after exact-head CI, security review, and Greptile 5/5 passed. Reviewed head:
-  `afc159cf39a1228608c1f864648ab359a57bf357`; merge:
-  `86c965ce7ab1499864f74b8dd6ed0d2d8db15197`. Devin's original implementation
-  and authorship are retained. The earlier prototype on `codex/recoverable-skill-cache`
-  must not ship as a competing worker.
-- Git [PR #16457](https://github.com/paperclipai/paperclip/pull/16457) is open on
-  `codex/recoverable-git-cache`, rebased onto that merge. Initial review head:
-  `bb3984d3fd13e7a5604e9d90c7d58748d4b50708`. CI and review are pending.
-- Git evidence: 17 real database/filesystem cases passed in 48.04s, including
-  expiration/reopening at A after upstream B, subsequent commits, interrupted
-  trash deletion, concurrent reopening, unique files/Git state, live consumers,
-  upstream failure, company boundaries, shared bases, and nested private sources.
-  Three final guard cases passed; 328 existing controls passed in 238.69s.
-  Evidence: `/tmp/paperclip-git-expiration-tests4.log`,
-  `/tmp/paperclip-git-final-guards.log`, `/tmp/paperclip-git-existing-controls.log`.
-- Skill evidence: 21 final focused cases passed in 29.99s and 35 affected
-  skill/heartbeat controls passed. Streaming discovery holds directory cursors
-  across bounded pages; a regression counts actual reads. Preparation/pinning
-  and eviction share company locks; filesystem inspection/deletion do not hold
-  the preparation lock. Immutable snapshots remain in the database.
-- Full local typecheck/build passed for both slices. The full test attempt ran
-  for 3,547.58s and did not pass: startup IPC capacity failures, mixed-revision
-  discovery tests, two unrelated controls, and module failures after the checkout
-  disappeared. It is not evidence of one clean SHA. Exact-head CI supersedes
-  the mixed-revision run for the merged skill PR. Focused final-code retries
-  classified the remaining failures: all 103 tests in the affected final-code
-  retry passed in 42.25s. Do not repeat an hour-long loop without cause.
-- The checkout unexpectedly disappeared at about 17:22 UTC after all code was
-  pushed. Restored the same branch/path from Git, reinstalled frozen dependencies
-  in 24.8s, and rebuilt successfully. Managed attachment recovery was unavailable
-  because the app could not verify ownership. All retained evidence is in `/tmp`.
-- Staging target: `paperclip.staging.paperclip.app`, `stack-pool-50531a9d17dd`.
-  One deployment request owns this task's rollout:
-  `38a0a286-7a97-4cd5-b58e-eabdaa4d38bd`, source merge `86c965ce7a…`.
-  First prepare failed with `direct_migrator_artifact_invalid` while the exact
-  source artifact was still publishing. After its publisher passed, reran that
-  failed prepare and resumed the same request. No campaign duplication.
-- Latest read-only staging baseline at 17:26 UTC: serving
-  `03f22f4cb9be9a34906bda0e4906262dc359e9ce`, disk 73%, 106,903,482,368 bytes
-  used and 40,395,079,680 available. This task has not deleted staging data.
-  Skill cleanup is configured enabled with dry-run true; Git cleanup is not enabled.
-- Existing unresolved staging runs have missing skill-version pins. The approved
-  conservative policy skips that company. Do not clear recovery or fabricate pins
-  to obtain savings. A disposable fixture must distinguish worker proof from the
-  ordinary product restoration journey and disclose this legacy-data limitation.
-- UI fixture created through Studio: skill `06a02b07-ee23-421c-afd1-5aa4b1dad423`,
-  slug `cache-restoration-acceptance-20261015`, initial saved marker
-  `SAVED-SKILL-V1-20261015`. No test run yet. Clean up only this task's fixtures.
-- Live Git inventory: 152 active Git workspaces, 150 with runtime ownership and
-  37 with isolated remote sources. Other owned task worktrees use shared managed
-  bases. Support both layouts while preserving shared bases.
-- Temporary Railway key `paperclip-cleanup-acceptance-2026-10-15` remains
-  registered under explicit user approval. Revoke it and remove both local copies
-  when access is no longer needed; private paths are in retained task evidence.
-- Git review found two second-cycle bugs. The worker now clears the consumed
-  reopen fence before expiration dispatch; successful reopening marks the
-  recipe restored so a later missing worktree can reattach its newer branch. Eighteen
-  cases passed; an added symlink fixture initially broke its own relative Git
-  commondir. After retaining a valid absolute commondir, that safety case passed
-  in 10.63s. The new guard rejects symlinked administration storage before deletion.
-  A second review caught the normal preparation refresh moving A to B after
-  recipe retirement. Keeping a restored recipe preserves the refresh guard while
-  accepting subsequent branch commits. Both joined lifecycle tests now pass in
-  35.99s, including normal runtime preparation after reopening and another
-  missing-worktree rebuild after new work. The premature partial-edit test run
-  is excluded; `/tmp/paperclip-git-resumed-preparation2.log` is the completed run.
-  Full typecheck/build at `465e57ad52` passed; the guard change has its own server
-  typecheck. A CI policy test also mistook a script filename for a
-  GitHub secret expression; scope its check to expressions and retain explicit
-  dot/bracket/multiline secret controls.
-- Remaining: address Git review, merge after all gates pass, verify exact serving
-  SHAs, dry-run both slices, measure actual reclamation, use restored skill and
-  reopened workspace through the product, inspect persisted results and protected
-  data, record final evidence, and revoke temporary access. No live acceptance yet.
-- Latest branch-adoption review fix keeps the retained recipe's branch synchronized
-  with the row inside the existing reconciliation transaction. The joined restore,
-  rename, adoption, and normal-preparation case passed in 16.67s; 11 existing
-  reconciliation controls passed in 21.83s. Full typecheck/build passed for this
-  change. Evidence: `/tmp/paperclip-git-branch-adoption.log`,
-  `/tmp/paperclip-git-reconcile-controls.log`, and
-  `/tmp/paperclip-git-adoption-{typecheck,build}.log`.
-- Skill deployment artifacts finished, but its deploy stage was rejected at
-  17:50 UTC because another campaign already held the target. No competing
-  campaign was created. Inspect that operation before rerunning the same request.
-  UI fixture v2 is saved; neither staging fixture eviction nor restoration has run.
+- Skill [PR #16433](https://github.com/paperclipai/paperclip/pull/16433) merged as
+  `86c965ce7ab1499864f74b8dd6ed0d2d8db15197`. Git
+  [PR #16457](https://github.com/paperclipai/paperclip/pull/16457) merged as
+  `59a70dc9e235d6df3d7db69b3ca170196d0c749f`. Both passed exact-head CI,
+  security checks, and Greptile 5/5 with resolved findings. The user explicitly
+  approved the administrator merge of #16457 after the self-approval gate.
+- Staging now serves full Git merge SHA `59a70dc9e235d6df3d7db69b3ca170196d0c749f`.
+  Single-workspace request `8ab463d8-ec8b-49fc-a4b9-29ee7318b19d`, campaign
+  `fleet-campaign-1792088485703`, Railway deployment
+  `6ce6e01a-bf67-48d2-af56-c354de3d4b59` reached ready at 19:02:08 UTC.
+  Skill cleanup is enabled and applying. Git worktree/base cleanup is enabled
+  in dry-run mode. Fleet defaults remain unchanged.
+- Live skill service proof: reclaimed 151,552 bytes from a disposable old version,
+  preserved current bytes and immutable records, and restored identical saved
+  hashes and 0444/0555 modes with upstream disabled. Automatic scheduler proof
+  passed at 19:06:36 UTC after re-aging that restored fixture. Normal UI task
+  acceptance for version 3 is queued; its disposable cache was removed at
+  19:06:47 UTC, with saved hash, mode, pin, and subsequent-result assertions.
+- Real Git dry run on the serving build inspected 44 workspaces in 81.116s:
+  zero eligible; 16 dirty/untracked, 9 unique ignored, 15 live/unresolved,
+  1 unknown worktree metadata, 3 inspection failures. No original Git data was
+  deleted. Original-company skill caches remain protected by unresolved legacy
+  runs without reliable pins. The original GiB estimates are not reclaimed bytes.
+- Live Git fixture correctly expired its 1,069,056-byte worktree and retained
+  the unique-file control, but private-base acceptance failed. Linux Git creates
+  a standard empty `.git/branches` directory that the strict metadata allowlist
+  rejected. Retained fixture and failure evidence; no manual base deletion.
+  Follow-up branch `codex/git-cache-linux-template` allows only a real, empty
+  branches directory, retains populated/symlink variants, and fixes pending-base
+  dry-run inspection after the worktree is already absent. Local reproduction
+  failed before the fix; lifecycle regression checks are running.
+- Normal v3 skill task acceptance passed at 19:12:24 UTC on full SHA `59a70dc9`:
+  run `4d7f0b23-3f4a-4de0-946f-91776d3f80c3` succeeded, task is done,
+  saved result is `SAVED-SKILL-V3-20261015`, restored hash/mode and version pin
+  match. Screenshot `skill-v3-user-proof.png`; evidence `ui-v3-restoration.jsonl`.
+  The failed disposable Studio task was cancelled through the normal UI.
+- Follow-up [PR #16476](https://github.com/paperclipai/paperclip/pull/16476)
+  initially reached Greptile 5/5 after removing added comments. Before rollout,
+  inspection found the Git expiration branch bypassed existing dependency/build
+  compaction and replaced its startup deadline with a one-hour delay. A real Git
+  and database comparison reproduced both failures in 7.67s. The fix retains
+  existing guarded compaction before expiration, excludes already-closed rows,
+  and preserves a pending compaction deadline. Affected lifecycle/compaction
+  controls are running. The superseded preview build `38793078424` was cancelled;
+  wait for the corrected reviewed candidate before the only next deployment.
+- Git apply is configured for the next deployment only (`--skip-deploys`); the
+  current process remains dry-run. Retained fixture baseline at 19:18:43 UTC:
+  base 229,376 bytes, expired worktree 1,069,056 bytes, unique control SHA-256
+  `e1f76d842fffaac2347b23932bd604fda5e22fc6c3a7df434459b416295d3ab1`.
+  Let the restarted scheduler resume pending base deletion; inspect its logs,
+  then reopen through the UI at A after B and perform subsequent persisted work.
+- Remaining: finish follow-up review/checks/merge/deploy; automatic Git cleanup,
+  ordinary reopening and subsequent work; record final usage; remove owned test
+  clutter, reconcile the pin, and revoke/remove the temporary SSH key. The fleet
+  default is still `95692b7785` (before both original PRs), so unpinning now would
+  roll back the verified build. Do not change the fleet default.
+
+
+Evidence root: `/tmp/paperclip-cleanup-staging/` locally and
+`/paperclip/instances/default/acceptance/recoverable-cache-20261015/` on staging.
+This is the single delivery state record.
+
+- Prior Git lifecycle suite: 20/20 in 46.41s, 328 controls in 238.69s,
+  11 reconciliation controls in 21.83s, branch-adoption case in 16.67s.
+  Full typecheck/build passed. Skill 21 cases in 29.99s plus 35 controls passed.
+  The hour-long mixed-revision full-suite attempt failed with IPC/capacity and
+  checkout disappearance; final 103 retries and both exact-head CI suites passed.
+  Reuse unaffected passing evidence; do not repeat that failed hour-long loop.
+- Retain material failures: Studio skill-test mode failed before execution
+  (plugin-worker plumbing and Runner unsupported mode); this is deferred.
+  Ordinary v2 UI baseline succeeded on intervening fleet SHA `95692b7785`, not
+  the delivered cleanup build, so it does not count as final acceptance.
+- An unrelated scheduled fleet rollout interrupted admission. Target-only
+  user-managed pin was set at 18:39 UTC (previous false); audit evidence is
+  `staging-pin.json`. Reconcile after acceptance, checking default release first
+  because clearing this pin triggers a catch-up deployment. Fleet defaults stay
+  unchanged. The user's existing New Task draft and project were restored.
+- Railway SSH defaults to root; service UID/GID is 1001. Root dry-run evidence
+  is invalid due to Git ownership checks. All current service harnesses run as
+  `gosu node`; only owned acceptance directories were corrected to service UID.
+- Temporary key `paperclip-cleanup-acceptance-2026-10-15`, fingerprint
+  `SHA256:belt4FaWVyB6rtM4eRr5y9M6oFdgXDPf0a1wpndlRRQ`, must be revoked and
+  both local copies removed at completion. Authorized key locations are the
+  private evidence directory and `~/.ssh/paperclip_cleanup_acceptance_20261015`.
 
 ## Feedback-loop evidence
 
