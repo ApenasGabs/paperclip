@@ -14,7 +14,7 @@ vi.mock("@/api/companies-query", () => ({ useAccountIdentity: () => ({ userId: "
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 let container: HTMLDivElement; let root: Root; let cache: QueryClient | null;
-const handlers = { onTest: vi.fn(), onRepair: vi.fn(), onPause: vi.fn(), onDisconnect: vi.fn(), onRefresh: vi.fn(), onAttest: vi.fn() };
+const handlers = { onTest: vi.fn(), onRepair: vi.fn(), onPause: vi.fn(), onDisconnect: vi.fn(), onRefresh: vi.fn(), onAttest: vi.fn(), onAttestDetectorCleanup: vi.fn() };
 beforeEach(() => { container = document.createElement("div"); document.body.append(container); root = createRoot(container); cache = null; vi.clearAllMocks(); });
 afterEach(async () => { await act(async () => root.unmount()); cache?.clear(); vi.restoreAllMocks(); container.remove(); vi.useRealTimers(); });
 const button = (name: string) => [...container.querySelectorAll("button")].find(b => b.textContent === name)!;
@@ -241,4 +241,59 @@ it("withdraws cached readiness after a failed update and restores it only after 
   expect(container.textContent).toContain("Muse is ready for tasks");
   expect(container.textContent).not.toContain("Connection updates paused");
   expect(button("Test background reply").disabled).toBe(false);
+});
+
+
+function cleanupConnection(): MuseConnection {
+  return { ...stoppedMuseConnection, binding: { ...stoppedMuseConnection.binding!, qualification: { id: "88888888-8888-4888-8888-888888888888", expiresAt: "2026-10-15T14:00:00Z" }, cleanup: { ...stoppedMuseConnection.binding!.cleanup, attestationEligible: true, hookScript: `~/hooks/scripts/paperclip-muse-${stoppedMuseConnection.binding!.id}.sh`, detectorEvidence: null } } };
+}
+async function fillDetectorObservation() {
+  await act(async () => button("Record detector removal observation").click());
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    for (const [label, value] of [["Registered Muse hook ID", "test-registered-hook"], ["Detector removal observation SHA-256", "d".repeat(64)]]) {
+      const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+      setter.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await act(async () => container.querySelector<HTMLInputElement>('[aria-label="Record exact Muse detector removal"] input[type="checkbox"]')!.click());
+}
+it("records exact detector observation while disabled and reads back authoritative operator provenance", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T15:00:00Z"));
+  const connection = cleanupConnection();
+  const load = vi.spyOn(museInvitationsApi, "connection").mockResolvedValue(connection);
+  const record = vi.spyOn(museInvitationsApi, "attestDetectorCleanup").mockImplementation(async () => {
+    load.mockResolvedValue({ ...connection, binding: { ...connection.binding!, revision: connection.binding!.revision + 1, cleanup: { ...connection.binding!.cleanup, detectorRemoved: true, attestationEligible: false, detectorEvidence: { bindingId: connection.binding!.id, generation: connection.binding!.generation, qualificationId: connection.binding!.qualification!.id, hookScript: connection.binding!.cleanup.hookScript!, source: "operator_runtime_attestation", recordedAt: new Date().toISOString(), observedAt: new Date().toISOString(), operatorId: "operator", hookId: "test-registered-hook" } } } });
+  });
+  await renderRunner(); expect(button("Record detector removal observation").disabled).toBe(false);
+  await fillDetectorObservation(); expect(container.textContent).toContain(connection.binding!.cleanup.hookScript);
+  expect(container.textContent).toContain("include_disabled: true");
+  expect(button("Confirm detector observation").disabled).toBe(false);
+  await act(async () => button("Confirm detector observation").click());
+  await act(async () => { await vi.advanceTimersByTimeAsync(30); });
+  expect(record).toHaveBeenCalledExactlyOnceWith("company", "agent", expect.objectContaining({ bindingId: connection.binding!.id, generation: connection.binding!.generation, expectedRevision: connection.binding!.revision, qualificationId: connection.binding!.qualification!.id, hookScript: connection.binding!.cleanup.hookScript, observation: { method: "hooks.list", includeDisabled: true, hookId: "test-registered-hook", outcome: "exact_hook_absent", sha256: "d".repeat(64), observedAt: new Date().toISOString() } }));
+  expect(container.textContent).toContain("Detector removal: operator-attested");
+  expect(container.textContent).toContain("not independent provider confirmation");
+  expect(container.textContent).toContain("Native effect outcomes remain unknown");
+  expect(container.querySelector('[aria-label="Record exact Muse detector removal"]')).toBeNull();
+});
+it.each(["revision", "binding", "offline"])("invalidates detector confirmation after a %s update", async change => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T15:00:00Z"));
+  const connection = cleanupConnection(), load = vi.spyOn(museInvitationsApi, "connection").mockResolvedValue(connection);
+  const record = vi.spyOn(museInvitationsApi, "attestDetectorCleanup").mockResolvedValue(undefined);
+  await renderRunner(); await fillDetectorObservation();
+  if (change === "offline") load.mockRejectedValue(new Error("Connection update unavailable"));
+  else load.mockResolvedValue({ ...connection, binding: { ...connection.binding!, ...(change === "revision" ? { revision: connection.binding!.revision + 1 } : { id: "55555555-5555-4555-8555-555555555555", generation: 3 }) } });
+  await act(async () => { await cache!.refetchQueries({ queryKey: ["muse-binding"] }); await vi.advanceTimersByTimeAsync(30); });
+  expect(container.querySelector('[aria-label="Record exact Muse detector removal"]')).toBeNull(); expect(record).not.toHaveBeenCalled();
+  if (change === "offline") expect(button("Record detector removal observation").disabled).toBe(true);
+});
+it("rechecks the server snapshot before submitting a cached detector confirmation", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T15:00:00Z"));
+  const connection = cleanupConnection(), load = vi.spyOn(museInvitationsApi, "connection").mockResolvedValue(connection);
+  const record = vi.spyOn(museInvitationsApi, "attestDetectorCleanup").mockResolvedValue(undefined);
+  await renderRunner(); await fillDetectorObservation();
+  load.mockResolvedValue({ ...connection, binding: { ...connection.binding!, revision: connection.binding!.revision + 1 } });
+  await act(async () => button("Confirm detector observation").click()); await act(async () => { await vi.advanceTimersByTimeAsync(30); });
+  expect(record).not.toHaveBeenCalled(); expect(container.textContent).toContain("Connection changed");
 });

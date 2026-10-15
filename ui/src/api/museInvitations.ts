@@ -1,7 +1,7 @@
 import { api, detachInflightGet } from "./client";
 import type {
   MuseInvitation, MuseInvitationInput, MuseConnection, MusePairing, MusePairingInput,
-  MuseVerifyInput, MuseVerifyResult, MuseRevokeInput, MuseAttestStopInput,
+  MuseVerifyInput, MuseVerifyResult, MuseRevokeInput, MuseDetectorCleanupAttestationInput, MuseAttestStopInput,
 } from "@paperclipai/shared";
 
 const path = (companyId: string, agentId: string) => `/companies/${companyId}/agents/${agentId}/muse-binding`;
@@ -18,5 +18,6 @@ export const museInvitationsApi = {
   pair: (companyId: string, agentId: string, input: MusePairingInput) => api.post<MusePairing>(path(companyId, agentId), input),
   verify: (companyId: string, agentId: string, input: MuseVerifyInput) => api.post<MuseVerifyResult>(path(companyId, agentId) + "/verify", input),
   revoke: (companyId: string, agentId: string, input: MuseRevokeInput) => api.post<void>(path(companyId, agentId) + "/revoke", input),
+  attestDetectorCleanup: (companyId: string, agentId: string, input: MuseDetectorCleanupAttestationInput) => api.post<void>(path(companyId, agentId) + "/attest-detector-cleanup", input),
   attestStop: (companyId: string, agentId: string, input: MuseAttestStopInput) => api.post<void>(path(companyId, agentId) + "/attest-stop", input),
 };

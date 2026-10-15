@@ -1,13 +1,14 @@
 import { Bot } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import type { MuseConnection, MusePairing, MuseAttestStopInput } from "@paperclipai/shared";
+import type { MuseConnection, MusePairing, MuseAttestStopInput, MuseDetectorCleanupAttestationInput } from "@paperclipai/shared";
 import { agentsApi } from "@/api/agents";
 import { useMuseConnection, useMuseConnectionState } from "@/hooks/useMuseConnection";
 import { queryKeys } from "@/lib/queryKeys";
 import { formatDateTime } from "@/lib/utils";
 import { AgentSetupPrompt } from "./AgentSetupPrompt";
 import { MuseConnectionChecks } from "./new-agent/ExternalAgentInviteContent";
+import { Input } from "./ui/input";
 import { Button } from "./ui/button";
 
 export interface MuseConnectionDetailsProps {
@@ -22,13 +23,20 @@ export interface MuseConnectionDetailsProps {
   onDisconnect: () => void;
   onRefresh: () => void;
   onAttest: (input: MuseAttestStopInput) => void;
+  onAttestDetectorCleanup?: (input: MuseDetectorCleanupAttestationInput) => void;
 }
 
 /** The settings view uses the same connection evidence as the invitation. */
-export function MuseConnectionDetails({ connection, pairing, busy, error, offline = false, onTest, onRepair, onPause, onDisconnect, onRefresh, onAttest }: MuseConnectionDetailsProps) {
+export function MuseConnectionDetails({ connection, pairing, busy, error, offline = false, onTest, onRepair, onPause, onDisconnect, onRefresh, onAttest, onAttestDetectorCleanup }: MuseConnectionDetailsProps) {
   const b = connection.binding;
   const [attestation, setAttestation] = useState<MuseAttestStopInput | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [detectorSnapshot, setDetectorSnapshot] = useState<Omit<MuseDetectorCleanupAttestationInput, "observation" | "detectorRemoved"> | null>(null);
+  const [detectorHookId, setDetectorHookId] = useState("");
+  const [observationDigest, setObservationDigest] = useState("");
+  const [detectorConfirmed, setDetectorConfirmed] = useState(false);
+  const detectorIdentity = JSON.stringify([b?.id, b?.generation, b?.revision, b?.qualification?.id, b?.cleanup.hookScript, b?.cleanup.attestationEligible, offline]);
+  useEffect(() => { setDetectorSnapshot(null); setObservationDigest(""); setDetectorHookId(""); setDetectorConfirmed(false); }, [detectorIdentity]);
   const boundaryIdentity = JSON.stringify(b?.stop.boundary);
   const stopBindingRevision = b?.stop.bindingRevision;
   useEffect(() => { setAttestation(null); setConfirmed(false); }, [boundaryIdentity, stopBindingRevision]);
@@ -61,9 +69,14 @@ export function MuseConnectionDetails({ connection, pairing, busy, error, offlin
       {b.status === "revoked" && <p role="status" className="text-sm text-muted-foreground">Disconnected. Paperclip credentials and execution authority were revoked.</p>}
       {(b.cleanup.pending || b.status === "revoked") && <div className="space-y-2 text-sm text-muted-foreground">
         {"detectorRemovalRequested" in b.cleanup && b.cleanup.detectorRemovalRequested === true && !b.cleanup.detectorRemoved && <p>Detector removal requested; completion is not confirmed.</p>}
-        <p>Detector removal: {b.cleanup.detectorRemoved ? "acknowledged" : "not confirmed"}. Worker quiescence: {b.cleanup.workerQuiescenceReported ? "reported" : "not confirmed"}.</p>
+        <p>Detector removal: {b.cleanup.detectorEvidence?.source === "operator_runtime_attestation" ? "operator-attested" : b.cleanup.detectorRemoved ? "acknowledged" : "not confirmed"}. Worker quiescence: {b.cleanup.workerQuiescenceReported ? "reported" : "not confirmed"}.</p>
         {b.cleanup.authenticatedAfterRevocation === false && <p>After disconnect, the receiver disables itself when it next reaches Paperclip. Cleanup cannot be confirmed through the revoked connection.</p>}
         {b.cleanup.expiresAt && <p className="text-xs">Cleanup capability expires {formatDateTime(b.cleanup.expiresAt)}.</p>}
+        {b.cleanup.detectorEvidence && <p>Recorded {timestamp(b.cleanup.detectorEvidence.recordedAt)}: {b.cleanup.detectorEvidence.source === "operator_runtime_attestation" ? "operator attestation from a supported runtime hook listing" : "authenticated worker report"}. This is not independent provider confirmation.</p>}
+        {b.cleanup.attestationEligible && onAttestDetectorCleanup && !detectorSnapshot && <Button type="button" variant="outline" disabled={busy || offline} onClick={() => {
+          if (!b.cleanup.hookScript) return;
+          setDetectorSnapshot({ bindingId: b.id, generation: b.generation, expectedRevision: b.revision, qualificationId: b.qualification?.id ?? null, hookScript: b.cleanup.hookScript });
+        }}>Record detector removal observation</Button>}
         <p>Detector removal, worker stopping, and sandbox cleanup are separate. Paperclip cannot verify every private Muse tool or stop all personal Muse conversations.</p>
       </div>}
       {b.stop.status !== "none" && <div className="space-y-3 text-sm">
@@ -78,6 +91,16 @@ export function MuseConnectionDetails({ connection, pairing, busy, error, offlin
         }}>Attest this worker stopped</Button>}
       </div>}
     </>}
+    {detectorSnapshot && <section aria-label="Record exact Muse detector removal" className="space-y-3 rounded-md border border-border p-3">
+      <p className="text-sm font-medium">Record an observation of this exact detector</p>
+      <p className="break-all font-mono text-xs">{detectorSnapshot.hookScript}</p>
+      <p className="text-sm text-muted-foreground">Use Muse’s supported <code>{"hooks.list({ include_disabled: true })"}</code> after revocation to verify this exact registered script is absent. Disabled checks, silence, or a removal request are insufficient. The retained hook ID and observation are your report. Paperclip does not verify installation, query Muse, or remove the hook.</p>
+      <label className="block space-y-2 text-sm">Registered hook ID<Input aria-label="Registered Muse hook ID" value={detectorHookId} onChange={event => setDetectorHookId(event.target.value)} autoComplete="off" /></label>
+      <label className="block space-y-2 text-sm">Observation SHA-256<Input aria-label="Detector removal observation SHA-256" value={observationDigest} onChange={event => setObservationDigest(event.target.value)} autoComplete="off" /></label>
+      <p className="text-xs text-muted-foreground">Use the digest of the secret-free runtime observation. Do not paste the listing, a URL, credentials, or private tool output.</p>
+      <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={detectorConfirmed} onChange={event => setDetectorConfirmed(event.target.checked)} className="mt-1 accent-primary" /><span>I observed this exact hook absent in the supported runtime listing after revocation. This attests detector removal only, not worker stopping or private effects.</span></label>
+      <div className="flex items-center justify-between gap-3"><Button type="button" variant="ghost" onClick={() => setDetectorSnapshot(null)}>Cancel</Button><Button type="button" disabled={!detectorConfirmed || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(detectorHookId) || !/^[a-f0-9]{64}$/.test(observationDigest) || busy || offline} onClick={() => onAttestDetectorCleanup?.({ ...detectorSnapshot, detectorRemoved: true, observation: { method: "hooks.list", includeDisabled: true, hookId: detectorHookId, outcome: "exact_hook_absent", observedAt: new Date().toISOString(), sha256: observationDigest } })}>Confirm detector observation</Button></div>
+    </section>}
     {attestation && <section aria-label="Attest this Muse worker stopped" className="space-y-3 rounded-md border border-border p-3">
       <p className="text-sm font-medium">Confirm the worker for this exact assignment stopped</p>
       <dl className="space-y-2 text-xs">
@@ -113,12 +136,12 @@ export function MuseRunnerConnection({ companyId, agentId }: { companyId?: strin
     if (companyId) void cache.invalidateQueries({ queryKey: queryKeys.agents.list(companyId) });
   } });
   if (!agentId) return <p className="text-sm text-muted-foreground">Save the agent, then connect your personal Muse here.</p>;
-  const error = muse.state.error ?? muse.pair.error ?? muse.verify.error ?? muse.revoke.error ?? muse.attest.error ?? pause.error;
+  const error = muse.state.error ?? muse.pair.error ?? muse.verify.error ?? muse.revoke.error ?? muse.attest.error ?? muse.attestDetector.error ?? pause.error;
   if (muse.identity.failed) return <div className="space-y-3"><p role="alert" className="text-sm text-destructive">Unable to confirm your account. Refresh to inspect this Muse connection.</p><Button type="button" variant="outline" onClick={() => { void cache.invalidateQueries({ queryKey: queryKeys.auth.session }); }}>Refresh</Button></div>;
   if (!muse.state.data) return <div className="space-y-3"><p role="status" className="text-sm text-muted-foreground">{muse.state.error ? "Unable to load the Muse connection." : "Loading Muse connection…"}</p>{error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}<Button type="button" variant="outline" onClick={() => { void muse.state.refetch(); }}>Refresh</Button></div>;
-  return <MuseConnectionDetails connection={muse.state.data} pairing={muse.pairing} offline={muse.state.isError}
-    busy={muse.pair.isPending || muse.verify.isPending || muse.revoke.isPending || muse.attest.isPending || pause.isPending}
+  return <MuseConnectionDetails key={muse.identity.userId} connection={muse.state.data} pairing={muse.pairing} offline={muse.state.isError}
+    busy={muse.pair.isPending || muse.verify.isPending || muse.revoke.isPending || muse.attest.isPending || muse.attestDetector.isPending || pause.isPending}
     error={error?.message} onTest={() => { if (muse.binding) muse.verify.mutate(muse.binding); }} onRepair={muse.repair}
     onPause={() => pause.mutate()} onDisconnect={() => { if (muse.binding) muse.revoke.mutate(muse.binding); }}
-    onRefresh={() => { void muse.state.refetch(); }} onAttest={input => muse.attest.mutate(input)} />;
+    onRefresh={() => { void muse.state.refetch(); }} onAttest={input => muse.attest.mutate(input)} onAttestDetectorCleanup={input => muse.attestDetector.mutate(input)} />;
 }

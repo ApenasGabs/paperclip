@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { MuseConnection, MuseBinding, MusePairing, MusePairingInput, MuseAttestStopInput } from "@paperclipai/shared";
+import type { MuseConnection, MuseBinding, MusePairing, MusePairingInput, MuseAttestStopInput, MuseDetectorCleanupAttestationInput } from "@paperclipai/shared";
 import { museInvitationsApi } from "@/api/museInvitations";
 import { useAccountIdentity } from "@/api/companies-query";
 import type { MuseConnectionState } from "@/components/new-agent/ExternalAgentInviteContent";
@@ -68,6 +68,14 @@ export function useMuseConnection(companyId: string | undefined, agentId: string
   }, onSuccess: () => { setPairing(null); void refresh(); } });
   const attest = useMutation({ mutationFn: (input: MuseAttestStopInput) => museInvitationsApi.attestStop(companyId!, agentId!, input),
     onSuccess: () => { void refresh(); }, onError: () => { void state.refetch(); } });
+  const attestDetector = useMutation({ mutationFn: async (input: MuseDetectorCleanupAttestationInput) => {
+    const requestScope = scope;
+    const current = await state.refetch({ throwOnError: true });
+    const b = current.data?.binding;
+    if (currentScope.current !== requestScope || !b || !b.cleanup.attestationEligible || b.id !== input.bindingId || b.generation !== input.generation || b.revision !== input.expectedRevision || (b.qualification?.id ?? null) !== input.qualificationId || b.cleanup.hookScript !== input.hookScript) throw new Error("Connection changed. Refresh before recording detector cleanup.");
+    await museInvitationsApi.attestDetectorCleanup(companyId!, agentId!, input);
+    await state.refetch({ throwOnError: true });
+  }, onError: () => { void state.refetch(); } });
   useEffect(() => { setPairing(null); }, [companyId, agentId, identity.userId]);
   useEffect(() => {
     if (!pairing) return;
@@ -77,7 +85,7 @@ export function useMuseConnection(companyId: string | undefined, agentId: string
   const binding = state.data?.binding;
   const currentPairing = pairing && pairing.bindingId === binding?.id && pairing.generation === binding.generation
     && pairing.revision === binding.revision && !binding.paired ? pairing : null;
-  return { state, binding, pairing: currentPairing, pair, verify, revoke, attest,
+  return { state, binding, pairing: currentPairing, pair, verify, revoke, attest, attestDetector,
     repair: () => pair.mutate(binding && binding.status !== "revoked" ? { replaceBindingId: binding.id, expectedRevision: binding.revision } : {}),
     key, identity, refresh };
 }
