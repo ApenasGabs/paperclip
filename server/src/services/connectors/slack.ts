@@ -4,6 +4,8 @@ import { slackMessage } from "./slack-message.js";
 import { executeSlackWrite } from "./slack-writes.js";
 import { syncSlackBotTools } from "./slack-catalog.js";
 import { SLACK_TOOLS } from "@paperclipai/shared";
+import { measureRunPhase } from "../execution-preparation-timing.js";
+import { measureRunTransaction } from "../execution-transaction-timing.js";
 import {
   toolProfiles,
   toolProfileBindings,
@@ -36,10 +38,10 @@ async function slackAssignedEndpoint(
   if (!binding.runId || !binding.issueId) return [];
   let authority: Awaited<ReturnType<typeof resolveSlackTaskAuthority>>;
   try {
-    authority = await resolveSlackTaskAuthority(
+    authority = await measureRunPhase("connectors.slack.authority", () => resolveSlackTaskAuthority(
       db,
       binding as SlackTaskBinding,
-    );
+    ));
   } catch (error) {
     if (
       error &&
@@ -51,10 +53,10 @@ async function slackAssignedEndpoint(
     throw error;
   }
   // Catalog updates are idempotent and preserve configured policies.
-  await db.transaction((tx) =>
+  await measureRunTransaction(db, "connectors.slack.catalog", (tx) =>
     syncSlackBotTools(tx, authority.endpoint, authority.userId, true),
   );
-  const [enabledProfile] = await db
+  const [enabledProfile] = await measureRunPhase("connectors.slack.profile", () => db
     .select({ id: toolProfiles.id })
     .from(toolProfiles)
     .innerJoin(
@@ -81,9 +83,9 @@ async function slackAssignedEndpoint(
         eq(toolProfiles.status, "active"),
       ),
     )
-    .limit(1);
+    .limit(1));
   if (!enabledProfile) return [];
-  authority = await resolveSlackTaskAuthority(db, binding as SlackTaskBinding);
+  authority = await measureRunPhase("connectors.slack.authority", () => resolveSlackTaskAuthority(db, binding as SlackTaskBinding));
   return [
     {
       id: authority.endpoint.id,
@@ -106,7 +108,7 @@ export async function slackAssignedResource(
   binding: Partial<SlackTaskBinding> & { companyId: string; agentId: string },
 ) {
   const resources = [];
-  for (const endpoint of await slackEndpointCandidates(db, binding)) {
+  for (const endpoint of await measureRunPhase("connectors.slack.candidates", () => slackEndpointCandidates(db, binding))) {
     resources.push(
       ...(await slackAssignedEndpoint(db, {
         ...binding,

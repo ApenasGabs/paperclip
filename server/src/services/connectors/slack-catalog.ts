@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { measureRunPhase } from "../execution-preparation-timing.js";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { SLACK_TOOLS } from "@paperclipai/shared";
 import {
@@ -35,13 +36,13 @@ export async function syncSlackBotTools(
       ),
     );
   if (!connection) return;
-  await tx.execute(
+  await measureRunPhase("connectors.slack.catalog.lock", () => tx.execute(
     sql`select pg_advisory_xact_lock(hashtextextended(${`slack-catalog:${endpoint.id}`}, 0))`,
-  );
-  const existingEntries = await tx
+  ));
+  const existingEntries = await measureRunPhase("connectors.slack.catalog.entries", () => tx
     .select()
     .from(toolCatalogEntries)
-    .where(eq(toolCatalogEntries.connectionId, connection.id));
+    .where(eq(toolCatalogEntries.connectionId, connection.id)));
   const entriesByName = new Map(
     existingEntries.map((entry) => [entry.name, entry]),
   );
@@ -79,7 +80,7 @@ export async function syncSlackBotTools(
     };
     const existing = entriesByName.get(values.name);
     if (existing?.versionHash === hash) continue;
-    await tx
+    await measureRunPhase("connectors.slack.catalog.write", () => tx
       .insert(toolCatalogEntries)
       .values(values)
       .onConflictDoUpdate({
@@ -94,10 +95,10 @@ export async function syncSlackBotTools(
               }
             : {}),
         },
-      });
+      }));
   }
   const profileKey = `slack-bot:${endpoint.id}`;
-  const [priorProfile] = await tx
+  const [priorProfile] = await measureRunPhase("connectors.slack.catalog.profile", () => tx
     .select()
     .from(toolProfiles)
     .where(
@@ -105,7 +106,7 @@ export async function syncSlackBotTools(
         eq(toolProfiles.companyId, endpoint.companyId),
         eq(toolProfiles.profileKey, profileKey),
       ),
-    );
+    ));
   if (priorProfile) return;
   const [profile] = await tx
     .insert(toolProfiles)
