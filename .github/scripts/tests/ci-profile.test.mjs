@@ -9,6 +9,7 @@ import { buildTrace } from "../../../scripts/ci-profile/trace.mjs";
 import { sendEvents } from "../../../scripts/ci-profile/export.mjs";
 import { associatedProfilePr, ciOwners, trustedOwnerIds } from "../../../scripts/ci-profile/authorize.mjs";
 
+const prJobSecretReference = /HONEYCOMB.*KEY|\$\{\{(?:'(?:[^']|'')*'|(?!\}\})[^'])*\bsecrets\s*(?:\.|\[)/;
 const at = (seconds) => new Date(1_800_000_000_000 + seconds * 1000).toISOString();
 const run = {
   id: 42, run_attempt: 1, run_number: 7, status: "completed", conclusion: "failure",
@@ -232,6 +233,20 @@ test("export paces batches and retries only rejected transient events", async ()
   await assert.rejects(sendEvents([events[0]], "test-only", "paperclip-ci", async () => ({ ok: true, json: async () => [{ status: 400 }] })), /status 400/);
 });
 
+test("PR jobs reject secret expressions without rejecting secret test filenames", () => {
+  assert.doesNotMatch("run: node --test scripts/docker-compose-secrets.test.mjs", prJobSecretReference);
+  assert.doesNotMatch("if: ${{ always() }}\nrun: node --test scripts/docker-compose-secrets.test.mjs", prJobSecretReference);
+  assert.doesNotMatch("if: ${{ startsWith(github.ref, 'ref') }}\nrun: 'node --test scripts/docker-compose-secrets.test.mjs'", prJobSecretReference);
+  for (const reference of [
+    "${{ secrets.EXAMPLE_TOKEN }}", "${{secrets.EXAMPLE_TOKEN}}",
+    "${{ secrets['EXAMPLE_TOKEN'] }}", '${{ secrets["EXAMPLE_TOKEN"] }}',
+    "${{ failure() && secrets.EXAMPLE_TOKEN }}", "${{\n secrets.EXAMPLE_TOKEN\n}}",
+    "${{ format('{0}', secrets.EXAMPLE_TOKEN) }}",
+    "${{ format('}}', secrets.EXAMPLE_TOKEN) }}",
+    "HONEYCOMB_CI_API_KEY",
+  ]) assert.match(reference, prJobSecretReference);
+});
+
 test("workflow exporter runs trusted code and keeps keys out of the PR jobs", () => {
   const workflow = readFileSync(new URL("../../workflows/ci-profile.yml", import.meta.url), "utf8");
   assert.match(workflow, /ref: \$\{\{ github.sha \}\}/);
@@ -239,7 +254,7 @@ test("workflow exporter runs trusted code and keeps keys out of the PR jobs", ()
   assert.match(workflow, /environment: ci-profiling/);
   assert.doesNotMatch(workflow, /head_sha|secrets: inherit|contents: write|pull-requests: write|pnpm install/);
   const pr = readFileSync(new URL("../../workflows/pr-trusted.yml", import.meta.url), "utf8");
-  assert.doesNotMatch(pr, /HONEYCOMB.*KEY|secrets\./);
+  assert.doesNotMatch(pr, prJobSecretReference);
   assert.match(pr, /if: always\(\) && env.PAPERCLIP_CI_PROFILE == 'true'/);
   assert.doesNotMatch(pr, /PAPERCLIP_CI_PROFILE:.*labels/);
   assert.equal(pr.match(/PAPERCLIP_CI_PROFILE: \$\{\{ needs.gate.outputs.profile_ci \}\}/g).length, 9);
