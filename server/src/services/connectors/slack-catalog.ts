@@ -20,6 +20,36 @@ import {
   resolveSlackTaskAuthority,
   slackEndpointCandidates,
 } from "./slack-authority.js";
+const catalogDefinitions = SLACK_TOOLS.map(tool => ({
+  tool,
+  hash: createHash("sha256").update(JSON.stringify({
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
+    risk: tool.risk,
+    scopes: tool.scopes,
+  })).digest("hex"),
+}));
+
+export async function slackBotCatalogIsCurrent(
+  db: Db,
+  endpoint: { id: string; companyId: string; connectionId: string },
+): Promise<boolean> {
+  const [entries, profiles] = await Promise.all([
+    db.select({ name: toolCatalogEntries.name, versionHash: toolCatalogEntries.versionHash })
+      .from(toolCatalogEntries).where(and(
+        eq(toolCatalogEntries.companyId, endpoint.companyId),
+        eq(toolCatalogEntries.connectionId, endpoint.connectionId),
+      )),
+    db.select({ id: toolProfiles.id }).from(toolProfiles).where(and(
+      eq(toolProfiles.companyId, endpoint.companyId),
+      eq(toolProfiles.profileKey, `slack-bot:${endpoint.id}`),
+    )).limit(1),
+  ]);
+  const hashes = new Map(entries.map(entry => [entry.name, entry.versionHash]));
+  return profiles.length > 0 && catalogDefinitions.every(({ tool, hash }) => hashes.get(`slack_bot:${tool.name}`) === hash);
+}
+
 export async function syncSlackBotTools(
   tx: Parameters<Parameters<Db["transaction"]>[0]>[0],
   endpoint: typeof chatEndpoints.$inferSelect,
@@ -46,18 +76,7 @@ export async function syncSlackBotTools(
   const entriesByName = new Map(
     existingEntries.map((entry) => [entry.name, entry]),
   );
-  for (const tool of SLACK_TOOLS) {
-    const hash = createHash("sha256")
-      .update(
-        JSON.stringify({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: tool.inputSchema,
-          risk: tool.risk,
-          scopes: tool.scopes,
-        }),
-      )
-      .digest("hex");
+  for (const { tool, hash } of catalogDefinitions) {
     const values = {
       companyId: endpoint.companyId,
       applicationId: connection.applicationId,

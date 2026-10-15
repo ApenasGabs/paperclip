@@ -279,7 +279,8 @@ attempt or owning phase:
 
 Detail phases emit at most 16 spans of each name per attempt. Larger reader and
 asset inventories continue under the containing group without unbounded per-row
-or per-file spans. Work, query order, authorization, and locks are unchanged.
+or per-file spans. Adding detail spans does not itself change work, query order,
+authorization, or locks.
 Manual transaction and dispatch boundaries retain their actual lifetime.
 Asset writes and verification may add only non-negative integer
 `paperclip.execution.fileCount` and `paperclip.execution.bytes` attributes.
@@ -294,6 +295,28 @@ notification call. None establishes browser paint or external delivery. The atte
 can continue through later bookkeeping and resource cleanup. A later recovery
 invocation has its own attempt; this does not manufacture one continuous trace
 across queueing, process restarts, or an unavailable controller.
+
+### Connector preparation work
+
+Run configuration resolves the four connector families concurrently and preserves
+registration order. Browser Use assignment reads only active Browser Use
+connections and their eligible catalog entries. It applies the same tool policy,
+grant, company, and restricted GitHub guest checks without joining the full tool
+discovery queue or resolving unrelated Slack, GitHub, and Speko tools.
+
+Native startup registers direct connector tool definitions from the run's pinned
+skills. It does not repeat assignment discovery. These definitions do not grant
+access: each invocation still resolves current assignments and enters the existing
+permission and approval gateway. A retained session may advertise a tool whose
+access was revoked; the call fails under the current authorization state.
+
+Slack assignment checks stored catalog hashes against the bundled definitions.
+A current catalog and existing profile need no catalog transaction or advisory
+lock. Current profile bindings and entries still determine availability, followed
+by one live task authority check. Missing or changed catalog definitions use the
+existing locked reconciliation path, with authority checks before and after the
+update. Disabled catalog entries and operator-removed bindings remain disabled.
+No authorization result is cached across calls.
 
 ### Reading a slow startup in Honeycomb
 
