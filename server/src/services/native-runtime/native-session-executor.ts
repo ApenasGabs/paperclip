@@ -435,6 +435,7 @@ export type NativeInstructionWorkingCopy = {
 };
 
 type WarmNativeSession = {
+  runId: string;
   instructionWorkingCopy?: NativeInstructionWorkingCopy;
   // Keep the admitted physical root independent of the per-run collection
   // capability, which instruction preparation adopts before final admission.
@@ -4245,7 +4246,7 @@ async function verifyPriorRunnerdStateForSessionScope(input: {
   identity: RunnerdDurableIdentity;
   execution: NativeExecutionInput;
   allowVerifiedBackup: boolean;
-  allowRetainedWarmRunner: boolean;
+  retainedWarmOwnerRunId?: string;
 }): Promise<PriorRunnerdStateVerification> {
   let priorRun: {
     status: string;
@@ -4292,7 +4293,7 @@ async function verifyPriorRunnerdStateForSessionScope(input: {
       input.identity,
     );
     if (
-      input.allowRetainedWarmRunner &&
+      input.retainedWarmOwnerRunId === input.identity.runId &&
       (lifecycle === "not_suspended" ||
         // A remote runner keeps runner-state.json in the sandbox rather than
         // beside the controller's PRP journal. During a genuinely warm handoff
@@ -4754,7 +4755,7 @@ async function migrateRunnerdStateRootForExecution(input: {
   db: Db;
   execution: NativeExecutionInput;
   allowVerifiedBackup: boolean;
-  allowRetainedWarmRunner: boolean;
+  retainedWarmOwnerRunId?: string;
   allowLocalRecovery: boolean;
   onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
   restartRecovery?: NativeRestartRecoveryClaim;
@@ -4771,7 +4772,7 @@ async function migrateRunnerdStateRootForExecution(input: {
   });
   if (
     input.allowLocalRecovery &&
-    !input.allowRetainedWarmRunner &&
+    !input.retainedWarmOwnerRunId &&
     !input.restartRecovery
   ) {
     await recoverQuiescentRunnerdState({ ...input, scoped });
@@ -4844,7 +4845,7 @@ async function migrateRunnerdStateRootForExecution(input: {
         identity,
         execution: input.execution,
         allowVerifiedBackup: input.allowVerifiedBackup,
-        allowRetainedWarmRunner: input.allowRetainedWarmRunner,
+        retainedWarmOwnerRunId: input.retainedWarmOwnerRunId,
       });
       if (
         verification !== "verified" &&
@@ -4886,7 +4887,7 @@ async function migrateRunnerdStateRootForExecution(input: {
         identity,
         execution: input.execution,
         allowVerifiedBackup: input.allowVerifiedBackup,
-        allowRetainedWarmRunner: input.allowRetainedWarmRunner,
+        retainedWarmOwnerRunId: input.retainedWarmOwnerRunId,
       });
       if (
         verification !== "verified" &&
@@ -5407,27 +5408,17 @@ function nativeSessionConfigDigest(
     .digest("hex")}`;
 }
 
-function hasIdleWarmNativeSessionOwner(input: {
+function idleWarmNativeSessionOwnerRunId(input: {
   execution: NativeExecutionInput;
   runnerExecutionTarget?: AdapterExecutionTarget | null;
-}): boolean {
-  if (input.execution.session.lifecyclePolicy.mode !== "warm") return false;
+}): string | undefined {
+  if (input.execution.session.lifecyclePolicy.mode !== "warm") return undefined;
   const entry = warmNativeSessions.get(nativeSessionScopeKey(input.execution));
-  if (!entry || (entry.busy && entry.instructionPreparationRunId !== input.execution.binding.runId)) return false;
-  // A verified idle owner proves the checkpoint belongs to this session even
-  // when its process must later rotate to a new run-scoped broker capability.
-  // Local environments also have an id. Compare the same environment binding
-  // stored at acquisition instead of treating every local target as unbound.
+  if (!entry || (entry.busy && entry.instructionPreparationRunId !== input.execution.binding.runId)) return undefined;
   const environmentId = input.runnerExecutionTarget?.environmentId ?? null;
-  return (
-    entry.companyId === input.execution.binding.companyId &&
-    entry.environmentId === environmentId &&
-    entry.configDigest ===
-      nativeSessionConfigDigest(
-        input.execution,
-        input.runnerExecutionTarget?.kind ?? "local",
-      )
-  );
+  return entry.companyId === input.execution.binding.companyId && entry.environmentId === environmentId
+    ? entry.runId
+    : undefined;
 }
 
 function nativeHarnessEnvironmentFingerprint(
@@ -7765,7 +7756,7 @@ async function executePaperclipNativeSessionWithinScope(
       // suspended. Only the exact idle in-process owner may rotate that
       // prior-run authority; after a hard restart the map is empty and the
       // durable-state verifier continues to require a suspended runner.
-      allowRetainedWarmRunner: hasIdleWarmNativeSessionOwner(input),
+      retainedWarmOwnerRunId: idleWarmNativeSessionOwnerRunId(input),
       allowLocalRecovery: input.runnerExecutionTarget?.kind !== "remote",
       onLog: input.onLog,
       restartRecovery: input.restartRecovery,
@@ -8867,8 +8858,10 @@ async function executePaperclipNativeSessionWithinScope(
                     throw new Error("native_session_supervisor_busy");
                   }
                   existing.session = session;
+                  existing.runId = input.execution.binding.runId;
                 } else
                   warmNativeSessions.set(warmSessionId, {
+                    runId: input.execution.binding.runId,
                     instructionWorkingCopy: input.instructionWorkingCopy?.checkpointWarm ? undefined : input.instructionWorkingCopy,
                     instructionRoot: input.instructionWorkingCopy?.root,
                     agentId: input.execution.binding.agentId,
@@ -11223,7 +11216,7 @@ export async function createRunnerdBackend(input: {
         db: input.db,
         execution: input.execution,
         allowVerifiedBackup: input.runnerExecutionTarget?.kind === "remote",
-        allowRetainedWarmRunner: false,
+        retainedWarmOwnerRunId: undefined,
         allowLocalRecovery: input.runnerExecutionTarget?.kind !== "remote",
         onLog: input.onLog,
         restartRecovery: input.restartRecovery,
