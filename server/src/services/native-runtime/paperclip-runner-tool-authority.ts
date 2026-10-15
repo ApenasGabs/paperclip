@@ -2188,9 +2188,6 @@ export class PaperclipRunnerToolAuthority {
         const context = await this.#lockAuthorizedMutationContext(
           tx as unknown as Db,
         );
-        if (this.binding.museRuntime && operationId === "write_document") {
-          await this.binding.assertBridgeAuthority?.(tx as unknown as Db);
-        }
         const isFilePreparation =
           operationId === "register_deliverable" ||
           operationId === REUSE_CHAT_ATTACHMENT_TOOL_NAME;
@@ -2278,9 +2275,12 @@ export class PaperclipRunnerToolAuthority {
         throw error;
       }
     };
-    return this.db.transaction(tx => this.binding.museRuntime && operationId === "write_document"
-      ? withExternalExecutionAdmission(tx, this.binding.companyId, this.binding.agentId, this.binding.runId, () => mutate(tx))
-      : mutate(tx));
+    return this.db.transaction(async tx => {
+      if (operationId === "create_task") {
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${this.binding.companyId}`}, 0))`);
+      }
+      return mutate(tx);
+    });
   }
 
   async #lockAuthorizedMutationContext(tx: Db): Promise<{
@@ -2288,6 +2288,10 @@ export class PaperclipRunnerToolAuthority {
     issue: typeof issues.$inferSelect;
     actor: typeof agents.$inferSelect;
   }> {
+    if (this.binding.museRuntime) {
+      await withExternalExecutionAdmission(tx as unknown as ExternalAdmissionTransaction,
+        this.binding.companyId, this.binding.agentId, this.binding.runId, async () => {});
+    }
     // Match identity activation and queue mutations before locking the run.
     await tx.select({ id: issues.id }).from(issues).where(and(
       eq(issues.id, this.binding.issueId), eq(issues.companyId, this.binding.companyId),
@@ -2337,6 +2341,7 @@ export class PaperclipRunnerToolAuthority {
           status: context.issue.status, assigneeAgentId: context.issue.assigneeAgentId, assigneeUserId: context.issue.assigneeUserId },
       });
       if (!decision.allowed) throw forbidden(decision.explanation);
+      await this.binding.assertBridgeAuthority?.(tx);
     }
     return context;
   }

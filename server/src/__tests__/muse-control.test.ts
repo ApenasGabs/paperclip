@@ -1,7 +1,7 @@
 import express from "express";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { activityLog, documents, issueDocuments } from "@paperclipai/db";
+import { activityLog, agentCommentary, documents, issueDocuments } from "@paperclipai/db";
 import request from "supertest";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -158,6 +158,208 @@ describe("personal Muse control plane",()=>{
       expect(await authority.execute({...call,callId:randomUUID()})).toEqual(result);
       expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);expect(assertBridgeAuthority).not.toHaveBeenCalled();
     }finally{await f.detach();}
+  });
+  it("serializes native and idle child creation without a privacy-tree deadlock",async()=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,native:Promise<{result?:unknown;error?:unknown}>|undefined,idle:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:(database=db)=>f.broker.assertRunAuthority(execution,database)});
+      const call={tool:"create_task",callId:randomUUID(),arguments:{title:"Native child",idempotencyKey:randomUUID()}};
+      const command={version:1 as const,command:"task.create" as const,requestId:randomUUID(),title:"Idle child",parentId:f.issue.id};
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      let ready=()=>{},holderPid=0,nativePid=0,idlePid=0;
+      const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:agents.id}).from(agents).where(and(eq(agents.id,f.agent.id),eq(agents.companyId,f.company.id))).for("update");
+        ready();await gate;
+      });
+      await locked;
+      native=authority.execute(call).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [waiter]=await db.execute<{pid:number}>(sql`select waiter.pid from pg_stat_activity waiter
+          inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted
+            and held.transactionid=waiting.transactionid
+          where waiter.datname=current_database() and waiter.wait_event_type='Lock' and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+              and tuple_lock.relation='agents'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)
+            and (select count(distinct relation) from pg_locks context_lock where context_lock.pid=waiter.pid
+              and context_lock.locktype='relation' and context_lock.mode='RowShareLock' and context_lock.granted
+              and context_lock.relation in ('issues'::regclass,'heartbeat_runs'::regclass,'agents'::regclass))=3`);
+        nativePid=waiter?.pid??0;return nativePid;
+      },{timeout:5000,interval:25}).toBeGreaterThan(0);
+      idle=f.broker.act(f.subject,command).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [waiter]=await db.execute<{pid:number}>(sql`select waiter.pid from pg_stat_activity waiter
+          where waiter.datname=current_database() and waiter.wait_event_type='Lock' and ${nativePid}=any(pg_blocking_pids(waiter.pid))`);
+        idlePid=waiter?.pid??0;return idlePid;
+      },{timeout:5000,interval:25}).toBeGreaterThan(0);
+      const privacyKey=`issue-privacy-tree:${f.company.id}`;
+      const privacyOwners=await db.execute<{pid:number}>(sql`select pid from pg_locks where locktype='advisory' and granted
+        and pid in (${nativePid},${idlePid}) and objsubid=1
+        and classid=((hashtextextended(${privacyKey},0)>>32)&4294967295)::oid
+        and objid=(hashtextextended(${privacyKey},0)&4294967295)::oid order by pid`);
+      expect(privacyOwners).toHaveLength(1);
+      const observed=JSON.stringify({holderPid,nativePid,idlePid,privacyOwners:privacyOwners.map(row=>row.pid)});
+      release();await holder;
+      const [nativeOutcome,idleOutcome]=await Promise.all([native,idle]);
+      expect(nativeOutcome.error,observed).toBeUndefined();expect(idleOutcome.error,observed).toBeUndefined();
+      expect(nativeOutcome.result).toMatchObject({disposition:"applied",task:{parentId:f.issue.id,status:"todo",assigneeActorId:f.agent.id}});
+      expect(idleOutcome.result).toMatchObject({status:"created"});
+      const nativeChildId=(nativeOutcome.result as {task:{id:string}}).task.id,idleChildId=String((idleOutcome.result as {issueId:string}).issueId);
+      expect(nativeChildId).not.toBe(idleChildId);
+      const children=await db.select().from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.parentId,f.issue.id)));
+      expect(children.map(child=>child.id).sort()).toEqual([nativeChildId,idleChildId].sort());
+      const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId));
+      expect(run.status).toBe("running");
+      expect((run.resultJson as {semanticToolReceipts:Record<string,unknown>}).semanticToolReceipts[call.arguments.idempotencyKey])
+        .toMatchObject({operationId:"create_task",input:call.arguments,result:nativeOutcome.result});
+      const receipts=await db.select().from(museIdleReceipts).where(and(eq(museIdleReceipts.bindingId,f.binding.id),eq(museIdleReceipts.bindingGeneration,f.binding.generation),eq(museIdleReceipts.requestId,command.requestId)));
+      expect(receipts).toHaveLength(1);expect(receipts[0].outcome).toEqual(idleOutcome.result);
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(nativeOutcome.result);
+      expect(await f.broker.act(f.subject,command)).toEqual(idleOutcome.result);
+      await expect(authority.execute({...call,callId:randomUUID(),arguments:{...call.arguments,title:"Changed native child"}})).rejects.toThrow("idempotency_conflict");
+      await expect(f.broker.act(f.subject,{...command,title:"Changed idle child"})).rejects.toThrow("changed input");
+      expect(await db.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.parentId,f.issue.id)))).toHaveLength(2);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toMatchObject({status:"accepted",acceptedResultAt:null,finalizedAt:null});
+    }finally{release();await Promise.allSettled([holder,native,idle]);await f.detach();}
+  });
+  it("keeps native document writes independent of the task-creation privacy lock",async()=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,write:Promise<{result?:unknown;error?:unknown}>|undefined,outcome:{result?:unknown;error?:unknown}|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:(database=db)=>f.broker.assertRunAuthority(execution,database)});
+      let ready=()=>{};const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${f.company.id}`},0))`);ready();await gate;
+      });
+      await locked;
+      const call={tool:"write_document",callId:randomUUID(),arguments:{key:"report",title:"Report",body:"Unrelated native mutation",baseRevisionId:null,idempotencyKey:randomUUID()}};
+      write=authority.execute(call).then(result=>(outcome={result}),error=>(outcome={error}));
+      await expect.poll(()=>outcome!==undefined,{timeout:5000,interval:25}).toBe(true);
+      expect(outcome?.error).toBeUndefined();expect(outcome?.result).toMatchObject({disposition:"applied",document:{body:call.arguments.body}});
+      expect(await documentService(db).getIssueDocumentByKey(f.issue.id,"report")).toMatchObject({body:call.arguments.body});
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(outcome?.result);
+      expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);
+    }finally{release();await Promise.allSettled([holder,write]);await f.detach();}
+  });
+  it.each(["report_progress","set_task_title","submit_complaint","submit_suggestion"].flatMap(tool=>[
+    {tool,replay:false,fault:"grant_revoked" as const},
+    {tool,replay:true,fault:"qualification_expired" as const},
+  ]))("rechecks local Muse mutation authority after a real task-lock wait ($tool/$fault/replay=$replay)",async({tool,replay,fault})=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,operation:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const checks:string[]=[],authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
+          await f.broker.assertRunAuthority(execution,database);checks.push(database===db?"discovery":"transaction");
+        }});
+      const idempotencyKey=randomUUID(),body="Muse current-authority regression",title="Current-authority title";
+      const call={tool,callId:randomUUID(),arguments:tool==="set_task_title"?{title,onlyIfProvisional:false,idempotencyKey}:{body,idempotencyKey}};
+      const snapshot=async()=>({
+        issue:await db.select({title:issues.title,status:issues.status,statusVersion:issues.statusVersion}).from(issues).where(eq(issues.id,f.issue.id)),
+        run:await db.select({status:heartbeatRuns.status,resultJson:heartbeatRuns.resultJson}).from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)),
+        comments:await db.select({id:issueComments.id,body:issueComments.body}).from(issueComments).where(eq(issueComments.issueId,f.issue.id)).orderBy(issueComments.id),
+        commentary:await db.select({id:agentCommentary.id,kind:agentCommentary.kind,body:agentCommentary.body,idempotencyKey:agentCommentary.idempotencyKey}).from(agentCommentary).where(eq(agentCommentary.runId,f.runId)).orderBy(agentCommentary.id),
+        activity:await db.select({id:activityLog.id,action:activityLog.action,entityId:activityLog.entityId}).from(activityLog).where(eq(activityLog.companyId,f.company.id)).orderBy(activityLog.id),
+      });
+      if(replay){
+        const first=await authority.execute(call),second=await authority.execute({...call,callId:randomUUID()});
+        if(tool==="report_progress"){
+          expect(first).toMatchObject({issueId:f.issue.id,disposition:"applied"});expect(second).toEqual(first);
+          expect(await db.select({body:issueComments.body}).from(issueComments).where(eq(issueComments.issueId,f.issue.id))).toEqual([{body}]);
+        }else if(tool==="set_task_title"){
+          expect(first).toMatchObject({id:f.issue.id,title,changed:true});expect(second).toEqual(first);
+          expect((await db.select({title:issues.title}).from(issues).where(eq(issues.id,f.issue.id)))[0]).toEqual({title});
+        }else{
+          const kind=tool==="submit_complaint"?"complaint":"suggestion";
+          expect(first).toMatchObject({kind,replayed:false});expect(second).toEqual({...(first as Record<string,unknown>),replayed:true});
+          expect(await db.select({kind:agentCommentary.kind,body:agentCommentary.body}).from(agentCommentary).where(eq(agentCommentary.runId,f.runId))).toEqual([{kind,body}]);
+        }
+      }
+      const before=await snapshot(),beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      checks.length=0;
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.id,f.issue.id))).for("update");ready();await gate;
+      });
+      await locked;
+      operation=authority.execute({...call,callId:randomUUID()}).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+          inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+          where waiter.datname=current_database() and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+              and tuple_lock.relation='issues'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)) as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      expect(checks).toEqual(["discovery"]);
+      if(fault==="grant_revoked")await db.update(mcpOauthGrants).set({revokedAt:new Date()}).where(eq(mcpOauthGrants.id,f.binding.grantId!));
+      else await db.update(bindings).set({qualificationId:randomUUID(),qualificationExpiresAt:new Date(Date.now()-1)}).where(eq(bindings.id,f.binding.id));
+      await expect(f.broker.assertRunAuthority(execution)).rejects.toMatchObject({status:403});
+      release();await holder;
+      const outcome=await operation;
+      expect(outcome.error).toMatchObject({status:403});expect(outcome.result).toBeUndefined();
+      expect(await snapshot()).toEqual(before);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select({status:assignments.status,acceptedResultAt:assignments.acceptedResultAt,finalizedAt:assignments.finalizedAt}).from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual({status:"accepted",acceptedResultAt:null,finalizedAt:null});
+    }finally{release();await Promise.allSettled([holder,operation]);await f.detach();}
+  });
+  it("rechecks native child creation authority after the real company privacy-lock wait",async()=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,operation:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const checks:string[]=[],authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
+          await f.broker.assertRunAuthority(execution,database);checks.push(database===db?"discovery":"transaction");
+        }});
+      const idempotencyKey=randomUUID(),call={tool:"create_task",callId:randomUUID(),arguments:{title:"Must not create after qualification expiry",idempotencyKey}};
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`issue-privacy-tree:${f.company.id}`},0))`);ready();await gate;
+      });
+      await locked;
+      operation=authority.execute(call).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_locks waiting
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='advisory' and held.granted
+            and held.database=waiting.database and held.classid=waiting.classid and held.objid=waiting.objid and held.objsubid=waiting.objsubid
+          where waiting.locktype='advisory' and not waiting.granted and ${holderPid}=any(pg_blocking_pids(waiting.pid))) as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      expect(checks).toEqual(["discovery"]);
+      await db.update(bindings).set({qualificationId:randomUUID(),qualificationExpiresAt:new Date(Date.now()-1)}).where(eq(bindings.id,f.binding.id));
+      await expect(f.broker.assertRunAuthority(execution)).rejects.toMatchObject({status:403});
+      release();await holder;
+      const outcome=await operation;
+      expect(outcome.error).toMatchObject({status:403});expect(outcome.result).toBeUndefined();
+      expect(await db.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.parentId,f.issue.id)))).toEqual([]);
+      expect(await db.select({id:activityLog.id}).from(activityLog).where(and(eq(activityLog.companyId,f.company.id),eq(activityLog.action,"issue.created")))).toEqual([]);
+      const [run]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId));
+      expect((run.resultJson as {semanticToolReceipts?:Record<string,unknown>}|null)?.semanticToolReceipts?.[idempotencyKey]).toBeUndefined();expect(run.status).toBe("running");
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select({status:assignments.status,acceptedResultAt:assignments.acceptedResultAt,finalizedAt:assignments.finalizedAt}).from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual({status:"accepted",acceptedResultAt:null,finalizedAt:null});
+    }finally{release();await Promise.allSettled([holder,operation]);await f.detach();}
   });
   async function detectorCleanupFixture(provided?:Awaited<ReturnType<typeof oauthFixture>>) {
     const f=provided??await oauthFixture(true),qualificationId=randomUUID(),expiresAt=new Date(Date.now()-60_000);
