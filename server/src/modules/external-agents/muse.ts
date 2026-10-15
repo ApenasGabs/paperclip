@@ -245,7 +245,7 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
             await tx.update(assignments).set({finalizedAt:run.finishedAt}).where(eq(assignments.id,a.id));
             const [unknown]=await tx.select({id:operations.id}).from(operations).where(and(eq(operations.assignmentId,a.id),inArray(operations.status,["unknown","dispatched","pending"]))).limit(1);
             if(run.status!=="succeeded"||unknown) {await fence(tx,b,"run_terminal_after_result");continue;}
-            if(!unknown&&run.status==="succeeded")await tx.update(holds).set({workerUnknown:false,releasedAt:new Date(),updatedAt:new Date()}).where(and(eq(holds.provider,"muse"),eq(holds.assignmentId,a.id),eq(holds.nativeEffectsUnknown,false)));
+            if(!unknown&&run.status==="succeeded")await tx.update(holds).set({workerUnknown:false,releasedAt:new Date(),updatedAt:new Date()}).where(and(eq(holds.provider,"muse"),eq(holds.assignmentId,a.id),eq(holds.nativeEffectsUnknown,false),isNull(holds.releasedAt)));
           } else if(["offered","claimed","accepted"].includes(a.status)) await fence(tx,b,"run_terminal");
         }
       }));

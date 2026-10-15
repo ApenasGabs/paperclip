@@ -1,4 +1,4 @@
-import { withExternalAdmissionGuard } from "./admission.js";
+import { withExternalAdmissionGuard, withExternalExecutionAdmission } from "./admission.js";
 import { createNativeExternalBroker } from "./native-broker.js";
 import { uploadSchema, type PublicMcpTransfers } from "../../services/public-mcp/file-transfers.js";
 import { grokRoutineService, grokWakeAcknowledgementSchema, lockGrokRoutineAcceptance } from "../../services/grok-bot/routine.js";
@@ -47,29 +47,29 @@ function createBroker(db: Db) {
   async function enabled(provider: "openai_dot" | "grok_bot" = "openai_dot") {
     return externalBotEnabled(db, provider);
   }
-  async function principalBinding(principal: McpPrincipal, requireReady = true, allowPaused = false) {
-    return authorizeExternalBotBinding(db, principal, { requireReady, allowPaused });
+  async function principalBinding(principal: McpPrincipal, requireReady = true, allowPaused = false, queryDb: Db = db) {
+    return authorizeExternalBotBinding(queryDb, principal, { requireReady, allowPaused });
   }
 
-  async function authorizeAssignment(principal: McpPrincipal, assignmentId: string, allowSettled = false) {
-    const binding = await principalBinding(principal);
-    const [a] = await db.select().from(assignments).where(and(eq(assignments.id, assignmentId), eq(assignments.companyId, binding.companyId),
+  async function authorizeAssignment(principal: McpPrincipal, assignmentId: string, allowSettled = false, queryDb: Db = db) {
+    const binding = await principalBinding(principal, true, false, queryDb);
+    const [a] = await queryDb.select().from(assignments).where(and(eq(assignments.id, assignmentId), eq(assignments.companyId, binding.companyId),
       eq(assignments.bindingId, binding.id), eq(assignments.agentId, binding.agentId), eq(assignments.bindingGeneration, binding.generation)));
     if (!a || a.expiresAt <= new Date() || a.status === "fenced" || (!allowSettled && a.status === "settled")) throw fail("Assignment authority expired or was revoked.");
     // Settled receipts are readable only under current company/agent/grant authority.
     // They never authorize replaying a mutation.
     if (a.status === "settled" && allowSettled) {
-      const [company] = await db.select().from(companies).where(eq(companies.id, a.companyId));
+      const [company] = await queryDb.select().from(companies).where(eq(companies.id, a.companyId));
       if (company?.status !== "active") throw fail("Company authority is unavailable.");
       return { binding, assignment: a };
     }
-    const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, a.runId), eq(heartbeatRuns.companyId, a.companyId), eq(heartbeatRuns.agentId, a.agentId)));
-    const [company] = await db.select().from(companies).where(eq(companies.id, a.companyId));
-    const [agent] = await db.select().from(agents).where(eq(agents.id, a.agentId));
-    const [coordinator] = await db.select().from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.runId, a.runId), eq(nativeRunFinalizations.companyId, a.companyId)));
-    const [issue] = run?.nativeIssueId ? await db.select().from(issues).where(and(eq(issues.id, run.nativeIssueId), eq(issues.companyId, a.companyId))) : [];
+    const [run] = await queryDb.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, a.runId), eq(heartbeatRuns.companyId, a.companyId), eq(heartbeatRuns.agentId, a.agentId)));
+    const [company] = await queryDb.select().from(companies).where(eq(companies.id, a.companyId));
+    const [agent] = await queryDb.select().from(agents).where(eq(agents.id, a.agentId));
+    const [coordinator] = await queryDb.select().from(nativeRunFinalizations).where(and(eq(nativeRunFinalizations.runId, a.runId), eq(nativeRunFinalizations.companyId, a.companyId)));
+    const [issue] = run?.nativeIssueId ? await queryDb.select().from(issues).where(and(eq(issues.id, run.nativeIssueId), eq(issues.companyId, a.companyId))) : [];
     const reviewContext = readNativeReviewAssignmentContext(run?.contextSnapshot);
-    const review = run && issue && reviewContext ? await getNativeReviewAssignment(db, {
+    const review = run && issue && reviewContext ? await getNativeReviewAssignment(queryDb, {
       companyId: a.companyId, issueId: issue.id, agentId: a.agentId,
       contextSnapshot: run.contextSnapshot, actingRunId: run.id, allowResolvedByRunId: run.id,
     }) : null;
@@ -202,26 +202,37 @@ function createBroker(db: Db) {
         acceptByUnixMs: Date.now() + 10 * 60_000, expiresAtUnixMs: Date.now() + 2 * 60 * 60_000 };
     },
     async authorizeFileSession(principal: McpPrincipal, assignmentId: string, taskId: string, write: boolean) {
-      if (write && principal.grant.purpose === "agent" && principal.grant.agentId) {
-        // A transfer transaction retains this lock through publication. Stop
-        // and terminal reconciliation cannot fence the assignment midway through
-        // an authorized effect; authority is rechecked after acquiring the lock.
-        await db.select({ id: assignments.id }).from(assignments).where(and(eq(assignments.id, assignmentId),
-          eq(assignments.companyId, principal.grant.companyId), eq(assignments.agentId, principal.grant.agentId))).for("share");
-      }
-      const { binding, assignment } = await authorizeAssignment(principal, assignmentId);
-      if (binding.providerKind !== "grok_bot" || assignment.status !== "accepted") throw fail("Files require a current accepted Grok work session.");
-      const [run] = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, assignment.runId), eq(heartbeatRuns.companyId, binding.companyId)));
-      if (run?.nativeIssueId !== taskId) throw fail("File is outside this work session's task.");
-      if (write) {
-        if (readNativeReviewAssignmentContext(run.contextSnapshot)) throw fail("Completion review sessions cannot upload deliverables.");
-        const [task] = await db.select().from(issues).where(and(eq(issues.id, taskId), eq(issues.companyId, binding.companyId)));
-        const deliverable = CAPABILITY_SEMANTIC_TOOL_CATALOG.find(tool => tool.operationId === "register_deliverable");
-        if (!task || !deliverable?.allowedModes.includes(task.workMode as "standard" | "planning" | "ask")) {
-          throw fail("This task's work mode does not permit deliverable uploads.");
+      const inspect = async (queryDb: Db) => {
+        const { binding, assignment } = await authorizeAssignment(principal, assignmentId, false, queryDb);
+        if (binding.providerKind !== "grok_bot" || assignment.status !== "accepted") throw fail("Files require a current accepted Grok work session.");
+        const [run] = await queryDb.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.id, assignment.runId), eq(heartbeatRuns.companyId, binding.companyId)));
+        if (run?.nativeIssueId !== taskId) throw fail("File is outside this work session's task.");
+        if (write) {
+          if (readNativeReviewAssignmentContext(run.contextSnapshot)) throw fail("Completion review sessions cannot upload deliverables.");
+          const [task] = await queryDb.select().from(issues).where(and(eq(issues.id, taskId), eq(issues.companyId, binding.companyId)));
+          const deliverable = CAPABILITY_SEMANTIC_TOOL_CATALOG.find(tool => tool.operationId === "register_deliverable");
+          if (!task || !deliverable?.allowedModes.includes(task.workMode as "standard" | "planning" | "ask")) {
+            throw fail("This task's work mode does not permit deliverable uploads.");
+          }
         }
-      }
-      return { agentId: binding.agentId, runId: assignment.runId };
+        return { agentId: binding.agentId, runId: assignment.runId };
+      };
+      if (!write) return inspect(db);
+      if (principal.grant.purpose !== "agent" || !principal.grant.agentId) throw fail("Files require a current accepted Grok work session.");
+      const [candidate] = await db.select().from(assignments).where(and(eq(assignments.id, assignmentId),
+        eq(assignments.companyId, principal.grant.companyId), eq(assignments.agentId, principal.grant.agentId)));
+      if (!candidate) throw fail("Assignment authority expired or was revoked.");
+      return db.transaction(tx => withExternalExecutionAdmission(tx, candidate.companyId, candidate.agentId, candidate.runId, async () => {
+        const [binding] = await tx.select().from(bindings).where(and(eq(bindings.id, candidate.bindingId),
+          eq(bindings.companyId, candidate.companyId), eq(bindings.agentId, candidate.agentId),
+          eq(bindings.generation, candidate.bindingGeneration), eq(bindings.grantId, principal.grant.id), isNull(bindings.revokedAt))).for("update");
+        if (!binding) throw fail("External binding unavailable.");
+        const [assignment] = await tx.select({ id: assignments.id }).from(assignments).where(and(eq(assignments.id, candidate.id),
+          eq(assignments.companyId, binding.companyId), eq(assignments.agentId, binding.agentId),
+          eq(assignments.bindingId, binding.id), eq(assignments.bindingGeneration, binding.generation), eq(assignments.runId, candidate.runId))).for("share");
+        if (!assignment) throw fail("Assignment authority expired or was revoked.");
+        return inspect(tx as unknown as Db);
+      }));
     },
     async assertWakeAuthority(companyId: string, agentId: string, bindingId: string, assignmentId: string, options: { requireOffered?: boolean } = {}) {
       const [binding] = await db.select().from(bindings).where(and(eq(bindings.id, bindingId), eq(bindings.companyId, companyId), eq(bindings.agentId, agentId), isNull(bindings.revokedAt)));

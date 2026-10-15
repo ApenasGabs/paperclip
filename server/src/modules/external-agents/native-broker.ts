@@ -12,7 +12,7 @@ import { grokRoutineService, lockGrokRoutineAcceptance } from "../../services/gr
 import { authorizeExternalBotOperator } from "../../services/external-bot-authority.js";
 import { inspectMuseConnectionCredential } from "../../services/muse-identity.js";
 import { consumeMuseHistoryReceipt } from "../../services/muse-assignment-follow-up.js";
-import { withExternalAdmissionGuard, type ExternalAdmissionTransaction } from "./admission.js";
+import { withExternalAdmissionGuard, withExternalExecutionAdmission as withExecutionAdmission, type ExternalAdmissionTransaction } from "./admission.js";
 
 // A closed pair of stores maps existing provider journals. There is no new
 // universal assignment table, copied Dot state, or generic write-set API.
@@ -44,14 +44,6 @@ export function createNativeExternalBroker<S>(db:Db,provider:Provider,identity:I
   const bindingColumns=sql.raw(`id,company_id AS "companyId",agent_id AS "agentId",generation,operator_id AS "operatorId",status,revoked_at AS "revokedAt",grant_id AS "grantId",${provider==="muse"?"NULL::text":"provider_kind"} AS "providerKind"`);
   const assignmentColumns=sql.raw(`id,company_id AS "companyId",agent_id AS "agentId",binding_id AS "bindingId",binding_generation AS "bindingGeneration",run_id AS "runId",normalized_session_id AS "normalizedSessionId",turn_id AS "turnId",revision,controller_generation AS "controllerGeneration",status,accept_by AS "acceptBy",expires_at AS "expiresAt",created_at AS "createdAt",${provider==="muse"?"claimed_at":"accepted_at"} AS "claimedAt",projection`);
   const receiptColumns=sql.raw(`id,company_id AS "companyId",assignment_id AS "assignmentId",request_id AS "requestId",digest,command,status,outcome,${provider==="muse"?"continuation_receipt_id":"NULL::uuid"} AS "continuationReceiptId"`);
-  async function withExecutionAdmission<T>(tx:ExternalAdmissionTransaction,companyId:string,agentId:string,runId:string,action:()=>Promise<T>) {
-    const [run]=await tx.select({issueId:heartbeatRuns.nativeIssueId}).from(heartbeatRuns).where(and(eq(heartbeatRuns.id,runId),eq(heartbeatRuns.companyId,companyId),eq(heartbeatRuns.agentId,agentId)));
-    if(!run?.issueId)throw forbidden("Native run task unavailable.");
-    await tx.select({id:issues.id}).from(issues).where(and(eq(issues.id,run.issueId),eq(issues.companyId,companyId))).for("update");
-    const [locked]=await tx.select({issueId:heartbeatRuns.nativeIssueId}).from(heartbeatRuns).where(eq(heartbeatRuns.id,runId)).for("update");
-    if(locked?.issueId!==run.issueId)throw conflict("Native run task changed during admission.");
-    return withExternalAdmissionGuard(tx,companyId,agentId,action);
-  }
   async function assignment(database:Database,id:string) {return (await database.execute<Assignment>(sql`select ${assignmentColumns} from ${assignmentTable} where id=${id}::uuid`))[0];}
   async function receipt(database:Database,id:string) {return (await database.execute<Receipt>(sql`select ${receiptColumns} from ${operationTable} where id=${id}::uuid`))[0];}
   async function currentBinding(database:Database,id:string,generation:number,allowFence=false) {
