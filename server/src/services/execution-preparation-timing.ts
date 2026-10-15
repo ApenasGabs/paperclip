@@ -14,6 +14,10 @@ type PreparationPhase = "environment_selection" | "execution_configuration" | "s
   | "workspace_provision_policy"
   | "workspace_base_validation"
   | "workspace_source_authorization"
+  | "workspace_source_materialize"
+  | "workspace_ownership_read"
+  | "workspace_environment_acquire"
+  | "workspace_environment_realize"
   | "workspace_provision"
   | "workspace_source_retention"
   | "workspace_binding"
@@ -36,6 +40,9 @@ export type ExecutionPhase =
   | "workspace.sources.repository_scan" | "workspace.sources.project_scan" | "workspace.provenance_lock"
   | "workspace.readers" | "workspace.readers.identity" | "workspace.readers.trust" | "workspace.readers.projects" | "workspace.readers.sources"
   | "workspace.access" | "workspace.access.privacy" | "workspace.access.inventory" | "workspace.access.authorization"
+  | "workspace.materialize.directories" | "workspace.materialize.source_identity"
+  | "workspace.checkout.lookup" | "workspace.checkout.git_auth" | "workspace.checkout.git_clone"
+  | "workspace.checkout.git_ref" | "workspace.checkout.publish"
   | "runtime_selection.review" | "runtime_selection.contract_read" | "runtime_selection.contract_ensure"
   | "runtime_selection.resume" | "runtime_selection.recovery_profile" | "runtime_selection.profile" | "runtime_selection.interactions"
   | "runtime_selection.provider_discovery" | "runtime_selection.bootstrap" | "runtime_selection.run_write" | "runtime_selection.finalization_write"
@@ -44,6 +51,26 @@ export type ExecutionPhase =
   | "runtime_context.instructions" | "runtime_context.skills" | "runtime_context.mcp"
   | "runtime_context.asset_read" | "runtime_context.asset_manifest" | "runtime_context.asset_cache" | "runtime_context.asset_materialize" | "runtime_context.asset_verify"
   | "workspace_sync.snapshot_git" | "workspace_sync.snapshot_baseline" | "workspace_sync.pack" | "workspace_sync.seed_verify" | "workspace_sync.stage_workspace" | "workspace_sync.restore"
+  | "workspace_sync.run_read" | "workspace_sync.descriptor_directory" | "workspace_sync.descriptor_read"
+  | "workspace_sync.prepare_host_current" | "workspace_sync.prepare_durable_seed" | "workspace_sync.prepare_adopt_remote"
+  | "workspace_sync.archive_hash" | "workspace_sync.warm_stamp" | "workspace_sync.durable_seed_verify"
+  | "workspace_sync.manifests_persist" | "workspace_sync.descriptor_write" | "workspace_sync.reference_write"
+  | "workspace_sync.source_root" | "workspace_sync.repositories" | "workspace_sync.ignore_rules"
+  | "workspace_sync.seed_generation" | "workspace_sync.seed_lookup" | "workspace_sync.seed_publish"
+  | "workspace_sync.git_clone" | "workspace_sync.git_archive" | "workspace_sync.seed_replay" | "workspace_sync.seed_persist"
+  | "workspace_sync.overlay_copy" | "workspace_sync.overlay_archive" | "workspace_sync.deleted_manifest"
+  | "workspace_sync.seed_extract" | "workspace_sync.seed_snapshot" | "workspace_sync.seed_cleanup"
+  | "workspace_sync.inbound_barrier" | "workspace_sync.transfer" | "workspace_sync.progress"
+  | "connectors.browser_use.resolve" | "connectors.speko.resolve" | "connectors.slack.resolve" | "connectors.agentmail.resolve"
+  | "connectors.browser_use.connection" | "connectors.browser_use.catalog" | "connectors.browser_use.grant"
+  | "connectors.discovery.scheduled" | "connectors.discovery.queue" | "connectors.discovery.build" | "connectors.discovery.agent"
+  | "connectors.discovery.connections" | "connectors.discovery.github" | "connectors.discovery.slack" | "connectors.discovery.speko"
+  | "connectors.discovery.policy" | "connectors.discovery.on_demand_policy"
+  | "connectors.slack.candidates" | "connectors.slack.authority" | "connectors.slack.profile"
+  | "connectors.slack.settings" | "connectors.slack.identity" | "connectors.slack.credentials" | "connectors.slack.revision"
+  | "connectors.slack.authority.transaction" | "connectors.slack.authority.transaction.entry" | "connectors.slack.authority.transaction.commit" | "connectors.slack.authority.transaction.rollback"
+  | "connectors.slack.catalog.transaction" | "connectors.slack.catalog.transaction.entry" | "connectors.slack.catalog.transaction.commit" | "connectors.slack.catalog.transaction.rollback"
+  | "connectors.slack.catalog.lock" | "connectors.slack.catalog.entries" | "connectors.slack.catalog.write" | "connectors.slack.catalog.profile"
   | "execution.runtime" | "execution.workspace_ownership" | "execution.workspace_finalize" | "execution.workspace_restore" | "execution.workspace_commit"
   | "execution.workspace_ownership_wait" | "execution.realtime"
   | "execution.usage" | "execution.native_finalize"
@@ -138,16 +165,58 @@ export function beginRunPhase(phase: ExecutionPhase): (failed?: boolean) => void
   } catch { return () => {}; }
 }
 
+export function measureToolDiscovery<T>(schedule: (work: () => Promise<T>) => Promise<T>, work: () => Promise<T>): Promise<T> {
+  return measureRunPhase("connectors.discovery.scheduled", async () => {
+    const queued = beginRunPhase("connectors.discovery.queue");
+    const build = AsyncLocalStorage.bind(() => {
+      queued();
+      return measureRunPhase("connectors.discovery.build", work);
+    });
+    let failed = false;
+    try { return await schedule(build); }
+    catch (error) { failed = true; throw error; }
+    finally { queued(failed); }
+  });
+}
+
 export function createRunPreparationTiming(runId: string, scope: "heartbeat.prepare" | "native.controller" = "heartbeat.prepare") {
   return <T>(phase: PreparationPhase, work: () => T | Promise<T>): Promise<T> => measure(runId, `${scope}.${phase}`, work);
 }
 
+const workspaceSyncDetailPhases = {
+  "workspace.source_root": "workspace_sync.source_root",
+  "workspace.repositories": "workspace_sync.repositories",
+  "workspace.ignore_rules": "workspace_sync.ignore_rules",
+  "workspace.seed_generation": "workspace_sync.seed_generation",
+  "workspace.seed_lookup": "workspace_sync.seed_lookup",
+  "workspace.seed_publish": "workspace_sync.seed_publish",
+  "workspace.git_clone": "workspace_sync.git_clone",
+  "workspace.git_archive": "workspace_sync.git_archive",
+  "workspace.seed_replay": "workspace_sync.seed_replay",
+  "workspace.seed_persist": "workspace_sync.seed_persist",
+  "workspace.overlay_copy": "workspace_sync.overlay_copy",
+  "workspace.overlay_archive": "workspace_sync.overlay_archive",
+  "workspace.deleted_manifest": "workspace_sync.deleted_manifest",
+  "workspace.seed_extract": "workspace_sync.seed_extract",
+  "workspace.seed_snapshot": "workspace_sync.seed_snapshot",
+  "workspace.seed_cleanup": "workspace_sync.seed_cleanup",
+  "workspace.inbound_barrier": "workspace_sync.inbound_barrier",
+  "workspace.transfer": "workspace_sync.transfer",
+  "workspace.progress": "workspace_sync.progress",
+} as const satisfies Record<string, ExecutionPhase>;
+
+export function isWorkspaceSyncDetailPhase(name: string): boolean {
+  return Object.prototype.hasOwnProperty.call(workspaceSyncDetailPhases, name);
+}
+
+const workspaceSyncPhases: Readonly<Record<string, ExecutionPhase>> = {
+  ...workspaceSyncDetailPhases,
+  "snapshot.git": "workspace_sync.snapshot_git", "snapshot.baseline": "workspace_sync.snapshot_baseline",
+  pack: "workspace_sync.pack", "seed.verify": "workspace_sync.seed_verify",
+  "stage.workspace": "workspace_sync.stage_workspace", "restore.workspace": "workspace_sync.restore",
+  "workspace.restore": "execution.workspace_restore",
+};
+
 export function measureWorkspaceSyncPhase<T>(name: string, work: () => Promise<T>): Promise<T> {
-  const phases: Readonly<Record<string, ExecutionPhase>> = {
-    "snapshot.git": "workspace_sync.snapshot_git", "snapshot.baseline": "workspace_sync.snapshot_baseline",
-    pack: "workspace_sync.pack", "seed.verify": "workspace_sync.seed_verify",
-    "stage.workspace": "workspace_sync.stage_workspace", "restore.workspace": "workspace_sync.restore",
-    "workspace.restore": "execution.workspace_restore",
-  };
-  return Object.prototype.hasOwnProperty.call(phases, name) ? measureRunPhase(phases[name]!, work) : work();
+  return Object.prototype.hasOwnProperty.call(workspaceSyncPhases, name) ? measureRunPhase(workspaceSyncPhases[name]!, work) : work();
 }
