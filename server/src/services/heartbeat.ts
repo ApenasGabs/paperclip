@@ -1,5 +1,5 @@
 import { dotRunnerBroker } from "./dot-runner-broker.js";
-import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase } from "./execution-preparation-timing.js";
+import { withRunExecutionTiming, measureRunPhase, measureWorkspaceSyncPhase, isWorkspaceSyncDetailPhase } from "./execution-preparation-timing.js";
 import { createHeartbeatPreparationTiming } from "./heartbeat/preparation-timing.js";
 import { createHeartbeatInstructionCopyRelease, createHeartbeatInstructionWorkingCopy } from "./heartbeat/instruction-working-copy.js";
 import { prepareHeartbeatRuntimeServiceIntents, startHeartbeatRuntimeServices, recordHeartbeatAdapterRuntimeServices } from "./heartbeat/runtime-services.js";
@@ -3320,10 +3320,11 @@ export function heartbeatService(
                 message: "workspace_checkpoint", payload: { phase: "workspace_checkpoint", ...metrics } });
             },
             onPhase: async (name, work) => {
+              if (isWorkspaceSyncDetailPhase(name)) return measureWorkspaceSyncPhase(name, work);
               const started = Date.now();
               try { return await measureWorkspaceSyncPhase(name, work); }
-              finally { await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info",
-                message: name, payload: { phase: name, durationMs: Date.now() - started } }); }
+              finally { await measureRunPhase("workspace_sync.progress", () => appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "info",
+                message: name, payload: { phase: name, durationMs: Date.now() - started } })); }
             },
           },
           config: {

@@ -509,8 +509,8 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         selectedProjectWorkspaceId: sourceChoice.projectWorkspaceId ?? readNonEmptyString(context.projectWorkspaceId),
         selection: sourceChoice.selection, strategy: parseObject(hostExecutionWorkspaceConfig.workspaceStrategy),
         trustPresetKind: trustPreset.kind })) throw error;
-      const cwd = await materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
-        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider });
+      const cwd = await timeWorkspace("workspace_source_materialize", () => materializeIsolatedRemoteWorkspaceSource({ companyId: agent.companyId,
+        issueId, repoUrl: executionWorkspaceBase.repoUrl!, resolveGitAuth: workspaceGitAuthProvider }));
       executionWorkspaceBase.baseCwd = cwd;
       resolvedWorkspace.cwd = cwd;
       isolatedRemoteSource = { schema: "paperclip.isolated-remote-source.v1", companyId: agent.companyId,
@@ -763,9 +763,9 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     try {
       persistedWorktreeInstanceRoot =
         (
-          await readManagedWorktreeInstanceOwnership(
-            executionWorkspace.worktreePath,
-          )
+          await timeWorkspace("workspace_ownership_read", () => readManagedWorktreeInstanceOwnership(
+            executionWorkspace.worktreePath!,
+          ))
         )?.instanceRoot ?? null;
     } catch (error) {
       logger.warn(
@@ -1008,7 +1008,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         recoveryWorkspace.remoteCwd !== remoteRecovery.remote.remoteCwd)) {
       throw new Error("native_remote_recovery_lease_mismatch");
     }
-    acquiredEnvironment = await envOrchestrator.acquireForRun({
+    acquiredEnvironment = await timeWorkspace("workspace_environment_acquire", () => envOrchestrator.acquireForRun({
       companyId: agent.companyId,
       selectedEnvironmentId,
       localEnvironmentId: localEnvironment.id,
@@ -1025,7 +1025,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
         providerLeaseId: remoteRecovery.remote.providerLeaseId,
         remoteCwd: remoteRecovery.remote.remoteCwd,
       } } : {}),
-    });
+    }));
     await controllerLease.assertOwned();
     nativeRunnerPreparationSpans.push({
       name: "environment.acquire",
@@ -1101,7 +1101,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
     ReturnType<typeof envOrchestrator.realizeForRun>
   >;
   try {
-    realizationResult = await envOrchestrator.realizeForRun({
+    realizationResult = await timeWorkspace("workspace_environment_realize", () => envOrchestrator.realizeForRun({
       environment: selectedEnvironment,
       lease: activeEnvironmentLease.lease,
       adapterType: agent.adapterType,
@@ -1112,7 +1112,7 @@ export async function prepareHeartbeatWorkspace(db: Db, input: HeartbeatWorkspac
       effectiveExecutionWorkspaceMode,
       persistedExecutionWorkspace,
       duplexObservabilityRecorder,
-    });
+    }));
     nativeRunnerPreparationSpans.push({
       name: "environment.workspace.realize",
       parentName: "task.provider_session",
