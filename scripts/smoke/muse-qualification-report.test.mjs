@@ -14,7 +14,7 @@ function evidence() {
     provenance: { coreRevision: "a".repeat(40), runnerRevision: "b".repeat(40), protocolVersion: 1, mode: "live", profile: "muse-personal", environment: "local" },
     samples, cadence: { from: iso(start), to: iso(expiry), observedIntervals: 17279, withinSevenSeconds: 17000, missingIntervals: 0, maxUnobservedGapMs: 0, complete: true },
     idleWindows: [{ from: iso(start + 6 * HOUR), to: iso(start + 9 * HOUR), coverageComplete: true, healthy: true, activeAssignments: 0, unconsumedInputs: 0 }],
-    cleanup: { authorityRevoked: true, workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [],
+    cleanup: { authorityRevoked: true, detectorRemovalRequested: true, detectorRemoved: true, workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [],
     workflows: Object.fromEntries(["researchDocument", "clarification", "followUp", "freshConversationProactive"].map(key => [key, { verified: true }])) };
 }
 test("complete live evidence reports claim and full-response latency separately", () => {
@@ -84,4 +84,29 @@ test("a receiver outage fails qualification despite otherwise regular five-secon
   assert.equal(report.qualificationPassed, false);
   assert.equal(report.releaseQualified, false);
   assert.ok(report.reasons.includes("incomplete_receiver_cadence_evidence"));
+});
+
+test("deadline cleanup remains incomplete until detector removal is requested and reported", () => {
+  for (const flags of [{}, { detectorRemovalRequested: false, detectorRemoved: false },
+    { detectorRemovalRequested: true, detectorRemoved: false },
+    { detectorRemovalRequested: false, detectorRemoved: true },
+    { detectorRemovalRequested: "true", detectorRemoved: true },
+    { detectorRemovalRequested: true, detectorRemoved: 1 }]) {
+    const e = evidence();
+    delete e.cleanup.detectorRemovalRequested; delete e.cleanup.detectorRemoved;
+    Object.assign(e.cleanup, flags);
+    const report = qualificationReport(e, expiry + 2000);
+    assert.equal(report.qualificationPassed, false);
+    assert.equal(report.releaseQualified, false); assert.equal(report.deadlineCleanupVerified, false);
+    assert.equal(report.authorityRevoked, true);
+    assert.equal(report.detectorRemovalRequested, flags.detectorRemovalRequested === true);
+    assert.equal(report.detectorRemovalReported, flags.detectorRemoved === true);
+    assert.ok(report.reasons.includes("deadline_cleanup_not_verified"));
+  }
+  const complete = qualificationReport(evidence(), expiry + 2000);
+  assert.equal(complete.schema, "paperclip.muse-qualification.v3");
+  assert.equal(complete.qualificationPassed, true); assert.equal(complete.releaseQualified, true);
+  assert.equal(complete.deadlineCleanupVerified, true);
+  assert.equal(complete.detectorRemovalRequested, true); assert.equal(complete.detectorRemovalReported, true);
+  assert.match(complete.evidenceBoundary, /worker-reported, not independently confirmed by the provider/);
 });

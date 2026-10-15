@@ -185,6 +185,8 @@ async function main() {
   if (state.version !== 3 || origin(state.apiBase) !== state.apiBase) throw new Error("Unsupported qualification state");
   if (!["check", "stop", "report"].includes(command ?? "")) throw new Error("Use start, check, stop or report");
   const result = command === "report" ? { evidence: await readEvidence(state), connection: await status(state) } : await tick(state, command === "stop");
+  const cleanupBinding = result.connection.binding?.id === state.bindingId && result.connection.binding.generation === state.generation
+    ? result.connection.binding : null;
   // API evidence is retained privately. The dedicated projector prints only allowlisted facts.
   // Cadence remains unqualified until the server's complete bounded contact evidence is available.
   const report = qualificationReport({
@@ -194,8 +196,11 @@ async function main() {
       from: window.startedAt, to: window.endedAt, coverageComplete: result.evidence.cadenceEvidenceComplete,
       healthy: result.evidence.cadenceEvidenceComplete, activeAssignments: 0, unconsumedInputs: 0,
     })),
-    cleanup: { authorityRevoked: result.evidence.authorityRevoked, workerStopUnconfirmed: result.connection.binding?.stop.status === "cannot_confirm" || result.connection.binding?.stop.status === "worker_reported",
-      nativeEffectsUnknown: result.connection.binding?.stop.nativeEffectsUnknown ?? true },
+    cleanup: { authorityRevoked: result.evidence.authorityRevoked,
+      detectorRemovalRequested: cleanupBinding?.cleanup?.detectorRemovalRequested === true,
+      detectorRemoved: cleanupBinding?.cleanup?.detectorRemoved === true,
+      workerStopUnconfirmed: !cleanupBinding || cleanupBinding.stop.status === "cannot_confirm" || cleanupBinding.stop.status === "worker_reported",
+      nativeEffectsUnknown: cleanupBinding?.stop.nativeEffectsUnknown ?? true },
     interventions: state.interventions,
   });
   report.samples = report.samples.map((sample: { nativeSucceeded: boolean }, index: number) => {
