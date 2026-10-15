@@ -251,7 +251,7 @@ async function fillDetectorObservation() {
   await act(async () => button("Record detector removal observation").click());
   await act(async () => {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
-    for (const [label, value] of [["Registered Muse hook ID", "test-registered-hook"], ["Detector removal observation SHA-256", "d".repeat(64)]]) {
+    for (const [label, value] of [["Registered Muse hook ID", "test-registered-hook"], ["Detector removal observation SHA-256", "d".repeat(64)], ["Detector removal observed at (UTC)", "2026-10-15T14:59:00.000Z"]]) {
       const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
       setter.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true }));
     }
@@ -269,7 +269,8 @@ it("records exact detector observation while disabled and reads back authoritati
   await fillDetectorObservation(); expect(container.textContent).toContain(connection.binding!.cleanup.hookScript);
   expect(container.textContent).toContain("include_disabled: true");
   expect(button("Confirm detector observation").disabled).toBe(false);
-  const observedAt = new Date().toISOString();
+  const observedAt = "2026-10-15T14:59:00.000Z";
+  vi.setSystemTime(new Date("2026-10-15T15:05:00Z"));
   await act(async () => button("Confirm detector observation").click());
   await act(async () => { await vi.advanceTimersByTimeAsync(30); });
   expect(record).toHaveBeenCalledExactlyOnceWith("company", "agent", expect.objectContaining({ bindingId: connection.binding!.id, generation: connection.binding!.generation, expectedRevision: connection.binding!.revision, qualificationId: connection.binding!.qualification!.id, hookScript: connection.binding!.cleanup.hookScript, observation: { method: "hooks.list", includeDisabled: true, hookId: "test-registered-hook", outcome: "exact_hook_absent", sha256: "d".repeat(64), observedAt } }));
@@ -297,4 +298,34 @@ it("rechecks the server snapshot before submitting a cached detector confirmatio
   load.mockResolvedValue({ ...connection, binding: { ...connection.binding!, revision: connection.binding!.revision + 1 } });
   await act(async () => button("Confirm detector observation").click()); await act(async () => { await vi.advanceTimersByTimeAsync(30); });
   expect(record).not.toHaveBeenCalled(); expect(container.textContent).toContain("Connection changed");
+});
+
+it("requires the actual detector listing time and reconfirms every observation edit", async () => {
+  vi.useFakeTimers(); vi.setSystemTime(new Date("2026-10-15T15:00:00Z"));
+  await render(cleanupConnection());
+  await fillDetectorObservation();
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+  const edit = async (label: string, value: string) => act(async () => {
+    const input = container.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!;
+    setter.call(input, value); input.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  const confirm = async () => act(async () => container.querySelector<HTMLInputElement>('[aria-label="Record exact Muse detector removal"] input[type="checkbox"]')!.click());
+  for (const [label, value] of [["Registered Muse hook ID", "another-registered-hook"], ["Detector removal observation SHA-256", "e".repeat(64)], ["Detector removal observed at (UTC)", "2026-10-15T14:58:00.000Z"]]) {
+    expect(button("Confirm detector observation").disabled).toBe(false);
+    await edit(label, value);
+    expect(button("Confirm detector observation").disabled).toBe(true);
+    await confirm();
+  }
+  for (const value of ["", "not-a-time", "2026-02-30T14:58:00.000Z"]) {
+    await edit("Detector removal observed at (UTC)", value); await confirm();
+    expect(button("Confirm detector observation").disabled).toBe(true);
+  }
+  expect(handlers.onAttestDetectorCleanup).not.toHaveBeenCalled();
+  await edit("Detector removal observed at (UTC)", "2026-10-15T13:00:00.000Z"); await confirm();
+  vi.setSystemTime(new Date("2026-10-15T15:10:00Z"));
+  await act(async () => button("Confirm detector observation").click());
+  expect(handlers.onAttestDetectorCleanup).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ observation: {
+    method: "hooks.list", includeDisabled: true, hookId: "another-registered-hook", outcome: "exact_hook_absent",
+    sha256: "e".repeat(64), observedAt: "2026-10-15T13:00:00.000Z",
+  } }));
 });

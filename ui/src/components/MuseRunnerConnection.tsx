@@ -1,6 +1,7 @@
 import { Bot } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { museDetectorCleanupAttestationSchema } from "@paperclipai/shared";
 import type { MuseConnection, MusePairing, MuseAttestStopInput, MuseDetectorCleanupAttestationInput } from "@paperclipai/shared";
 import { agentsApi } from "@/api/agents";
 import { useMuseConnection, useMuseConnectionState } from "@/hooks/useMuseConnection";
@@ -34,9 +35,11 @@ export function MuseConnectionDetails({ connection, pairing, busy, error, offlin
   const [detectorSnapshot, setDetectorSnapshot] = useState<Omit<MuseDetectorCleanupAttestationInput, "observation" | "detectorRemoved"> | null>(null);
   const [detectorHookId, setDetectorHookId] = useState("");
   const [observationDigest, setObservationDigest] = useState("");
+  const [detectorObservedAt, setDetectorObservedAt] = useState("");
+  const detectorObservedAtValid = museDetectorCleanupAttestationSchema.shape.observation.shape.observedAt.safeParse(detectorObservedAt).success;
   const [detectorConfirmed, setDetectorConfirmed] = useState(false);
   const detectorIdentity = JSON.stringify([b?.id, b?.generation, b?.revision, b?.qualification?.id, b?.cleanup.hookScript, b?.cleanup.attestationEligible, offline]);
-  useEffect(() => { setDetectorSnapshot(null); setObservationDigest(""); setDetectorHookId(""); setDetectorConfirmed(false); }, [detectorIdentity]);
+  useEffect(() => { setDetectorSnapshot(null); setObservationDigest(""); setDetectorObservedAt(""); setDetectorHookId(""); setDetectorConfirmed(false); }, [detectorIdentity]);
   const boundaryIdentity = JSON.stringify(b?.stop.boundary);
   const stopBindingRevision = b?.stop.bindingRevision;
   useEffect(() => { setAttestation(null); setConfirmed(false); }, [boundaryIdentity, stopBindingRevision]);
@@ -95,11 +98,13 @@ export function MuseConnectionDetails({ connection, pairing, busy, error, offlin
       <p className="text-sm font-medium">Record an observation of this exact detector</p>
       <p className="break-all font-mono text-xs">{detectorSnapshot.hookScript}</p>
       <p className="text-sm text-muted-foreground">Use Muse’s supported <code>{"hooks.list({ include_disabled: true })"}</code> after revocation to verify this exact registered script is absent. Disabled checks, silence, or a removal request are insufficient. The retained hook ID and observation are your report. Paperclip does not verify installation, query Muse, or remove the hook.</p>
-      <label className="block space-y-2 text-sm">Registered hook ID<Input aria-label="Registered Muse hook ID" value={detectorHookId} onChange={event => setDetectorHookId(event.target.value)} autoComplete="off" /></label>
-      <label className="block space-y-2 text-sm">Observation SHA-256<Input aria-label="Detector removal observation SHA-256" value={observationDigest} onChange={event => setObservationDigest(event.target.value)} autoComplete="off" /></label>
+      <label className="block space-y-2 text-sm">Registered hook ID<Input aria-label="Registered Muse hook ID" value={detectorHookId} onChange={event => { setDetectorHookId(event.target.value); setDetectorConfirmed(false); }} autoComplete="off" /></label>
+      <label className="block space-y-2 text-sm">Observation SHA-256<Input aria-label="Detector removal observation SHA-256" value={observationDigest} onChange={event => { setObservationDigest(event.target.value); setDetectorConfirmed(false); }} autoComplete="off" /></label>
       <p className="text-xs text-muted-foreground">Use the digest of the secret-free runtime observation. Do not paste the listing, a URL, credentials, or private tool output.</p>
+      <label className="block space-y-2 text-sm">Observed at (UTC)<Input aria-label="Detector removal observed at (UTC)" value={detectorObservedAt} onChange={event => { setDetectorObservedAt(event.target.value); setDetectorConfirmed(false); }} placeholder="YYYY-MM-DDTHH:mm:ss.sssZ" autoComplete="off" /></label>
+      <p className="text-xs text-muted-foreground">Enter the actual runtime listing time, not the time you submit this form. Paperclip checks it against revocation and the qualification deadline.</p>
       <label className="flex items-start gap-2 text-sm"><input type="checkbox" checked={detectorConfirmed} onChange={event => setDetectorConfirmed(event.target.checked)} className="mt-1 accent-primary" /><span>I observed this exact hook absent in the supported runtime listing after revocation. This attests detector removal only, not worker stopping or private effects.</span></label>
-      <div className="flex items-center justify-between gap-3"><Button type="button" variant="ghost" onClick={() => setDetectorSnapshot(null)}>Cancel</Button><Button type="button" disabled={!detectorConfirmed || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(detectorHookId) || !/^[a-f0-9]{64}$/.test(observationDigest) || busy || offline} onClick={() => onAttestDetectorCleanup?.({ ...detectorSnapshot, detectorRemoved: true, observation: { method: "hooks.list", includeDisabled: true, hookId: detectorHookId, outcome: "exact_hook_absent", observedAt: new Date().toISOString(), sha256: observationDigest } })}>Confirm detector observation</Button></div>
+      <div className="flex items-center justify-between gap-3"><Button type="button" variant="ghost" onClick={() => setDetectorSnapshot(null)}>Cancel</Button><Button type="button" disabled={!detectorConfirmed || !detectorObservedAtValid || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(detectorHookId) || !/^[a-f0-9]{64}$/.test(observationDigest) || busy || offline} onClick={() => onAttestDetectorCleanup?.({ ...detectorSnapshot, detectorRemoved: true, observation: { method: "hooks.list", includeDisabled: true, hookId: detectorHookId, outcome: "exact_hook_absent", observedAt: detectorObservedAt, sha256: observationDigest } })}>Confirm detector observation</Button></div>
     </section>}
     {attestation && <section aria-label="Attest this Muse worker stopped" className="space-y-3 rounded-md border border-border p-3">
       <p className="text-sm font-medium">Confirm the worker for this exact assignment stopped</p>

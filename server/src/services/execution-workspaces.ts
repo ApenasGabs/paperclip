@@ -3228,26 +3228,12 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
           result.skippedNonTerminalTree += 1;
           continue;
         }
-        if (opts.gitCacheExpirationEnabled && (hasPendingGitExpiration(workspace)
-          || (workspace.mode === "isolated_workspace" && workspace.strategyType === "git_worktree"))) {
-          const expiration = await expireReconstructableGitWorkspace(db, workspace, {
-            dryRun: opts.gitCacheExpirationDryRun ?? false, expireBase: opts.gitBaseExpirationEnabled ?? false,
-            now: now(), signal, beforeDelete: opts.beforeTerminalWorkspaceCleanup,
-          });
-          terminalWorkspaceDeadlines.set(workspace.id, now().getTime() + 60 * 60 * 1000);
-          if (expiration.candidate) result.eligible += 1;
-          if (expiration.expired) result.archived += 1;
-          logger.info({ event: "execution_workspace.git_cache_expiration", executionWorkspaceId: workspace.id,
-            companyId: workspace.companyId, dryRun: opts.gitCacheExpirationDryRun ?? false, ...expiration },
-          "Git workspace cache expiration inspected");
-          // A failed reconstruction proof must not fall through to legacy deletion.
-          continue;
-        }
         const latestTerminalAt = Math.max(...issueTree.map(issue => issueTerminalTimestamp(issue)!.getTime()));
         // Compaction runs once per terminal cycle, after its own delay and
         // before the archive cooldown, so a workspace the reaper cannot archive
         // yet (or ever) stops holding regenerable files.
         const compactionPending = workspaceCompactionDelayMs !== null
+          && !isClosedExecutionWorkspaceStatus(workspace.status)
           && !reopenPending
           && compactedTerminalAt.get(workspace.id) !== latestTerminalAt;
         const compactionDueAt = latestTerminalAt + (workspaceCompactionDelayMs ?? 0);
@@ -3271,6 +3257,23 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               "terminal workspace compaction failed; a later sweep retries",
             );
           }
+        }
+        if (opts.gitCacheExpirationEnabled && (hasPendingGitExpiration(workspace)
+          || (workspace.mode === "isolated_workspace" && workspace.strategyType === "git_worktree"))) {
+          const expiration = await expireReconstructableGitWorkspace(db, workspace, {
+            dryRun: opts.gitCacheExpirationDryRun ?? false, expireBase: opts.gitBaseExpirationEnabled ?? false,
+            now: now(), signal, beforeDelete: opts.beforeTerminalWorkspaceCleanup,
+          });
+          const expirationDueAt = now().getTime() + 60 * 60 * 1000;
+          terminalWorkspaceDeadlines.set(workspace.id,
+            compactionPending && compactedTerminalAt.get(workspace.id) !== latestTerminalAt
+              ? Math.min(expirationDueAt, compactionDueAt) : expirationDueAt);
+          if (expiration.candidate) result.eligible += 1;
+          if (expiration.expired) result.archived += 1;
+          logger.info({ event: "execution_workspace.git_cache_expiration", executionWorkspaceId: workspace.id,
+            companyId: workspace.companyId, dryRun: opts.gitCacheExpirationDryRun ?? false, ...expiration },
+          "Git workspace cache expiration inspected");
+          continue;
         }
         if (workspaceReaperCooldownMs > 0 && latestTerminalAt + workspaceReaperCooldownMs > now().getTime()) {
           result.skippedCooldown += 1;

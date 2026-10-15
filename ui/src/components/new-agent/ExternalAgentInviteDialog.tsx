@@ -192,7 +192,7 @@ function MuseInvitationController({ companyId, companyName, onClose, onBack, ini
     // The creation receipt contains no ticket; pairing happens in the mounted connection hook.
   }, gcTime: 0 });
   const b = muse.binding;
-  const canPrepare = !!invitation && muse.state.data?.enabled && muse.state.data.canConfigureConnection
+  const canPrepare = !!invitation && !muse.state.isError && muse.state.data?.enabled && muse.state.data.canConfigureConnection
     && !!muse.state.data.publicOrigin && (!b || b.status === "pairing");
   useEffect(() => {
     if (canPrepare && muse.state.isFetchedAfterMount && !muse.state.isFetching && !muse.pair.isPending
@@ -202,7 +202,7 @@ function MuseInvitationController({ companyId, companyName, onClose, onBack, ini
     }
   }, [canPrepare, muse.state.isFetchedAfterMount, muse.state.isFetching, muse.pair.isPending, muse.pairing, b?.id, b?.revision]);
   useEffect(() => {
-    if (b?.paired && b.credentialState === "active" && b.receiverDetected && !b.backgroundReplyVerified && !b.challengeExpiresAt
+    if (!muse.state.isError && b?.paired && b.credentialState === "active" && b.receiverDetected && !b.backgroundReplyVerified && !b.challengeExpiresAt
       && muse.state.data?.enabled && muse.state.data.canConfigureConnection
       && muse.state.isFetchedAfterMount && !muse.state.isFetching && !muse.verify.isPending && !muse.verify.isError) {
       const identity = `${b.id}:${b.generation}`;
@@ -211,7 +211,7 @@ function MuseInvitationController({ companyId, companyName, onClose, onBack, ini
         muse.verify.mutate(b);
       }
     }
-  }, [b, muse.state.data, muse.state.isFetchedAfterMount, muse.state.isFetching, muse.verify.isPending, muse.verify.isError]);
+  }, [b, muse.state.data, muse.state.isError, muse.state.isFetchedAfterMount, muse.state.isFetching, muse.verify.isPending, muse.verify.isError]);
   const pendingApproval = (muse.state.data?.agentStatus ?? invitation?.agent.status) === "pending_approval";
   const busy = create.isPending || muse.pair.isPending || muse.verify.isPending || (!invitation && (resume.isPending && !identity.failed || !identity.settled && !identity.failed))
     || (!!invitation && muse.state.isPending);
@@ -220,13 +220,13 @@ function MuseInvitationController({ companyId, companyName, onClose, onBack, ini
   const connection = useMuseConnectionState(muse.state.data, { offline: muse.state.isError, promptUnavailable });
   const verifyError = muse.verify.error instanceof ApiError && muse.verify.error.status === 409 && b?.challengeExpiresAt
     && Date.parse(b.challengeExpiresAt) > Date.now() ? null : muse.verify.error;
-  const error = create.error ?? resume.error ?? muse.pair.error ?? verifyError;
+  const error = create.error ?? resume.error ?? muse.state.error ?? muse.pair.error ?? verifyError;
   const operatorRequired = error instanceof ApiError && (error.status === 401 || error.status === 403)
     && !invitation;
   const missingPublicOrigin = !!invitation && muse.state.isSuccess && !muse.state.data.publicOrigin;
   const errorMessage = missingPublicOrigin ? "This instance has no public HTTPS URL for Muse. Ask your instance administrator to configure a stable public HTTPS address, then refresh setup. Muse cannot connect through a local-only address." : operatorRequired ? "Use an authenticated Paperclip instance with a public HTTPS URL and a company operator account. Local trusted access alone cannot connect Muse." : error?.message;
   return <ExternalAgentInviteContent preset="muse" companyName={companyName} prompt={muse.pairing?.setupInstruction ?? ""}
-    connection={{ phase: "waiting" }} museConnection={invitation && !missingPublicOrigin && b ? connection : undefined} busy={busy} error={identity.failed ? "Unable to confirm your account. Refresh to resume Muse setup." : errorMessage}
+    connection={{ phase: "waiting" }} museConnection={invitation && !missingPublicOrigin && (muse.state.data || muse.state.isError) ? connection : undefined} busy={busy} error={identity.failed ? "Unable to confirm your account. Refresh to resume Muse setup." : errorMessage}
     approvalHref={pendingApproval && invitation?.approvalId ? `/approvals/${invitation.approvalId}` : undefined}
     museDraft={!invitation && resume.isSuccess && identity.settled ? draft : undefined}
     onMuseDraftChange={value => { setDraftState({ scopeKey, value }); saveMuseInvitationDraft(companyId, identity.userId, value); }}

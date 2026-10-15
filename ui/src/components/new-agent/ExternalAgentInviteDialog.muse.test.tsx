@@ -238,3 +238,21 @@ it("reconnects an expired Vault connection on the existing agent without a backg
   });
   expect(museApi.create).not.toHaveBeenCalled();
 });
+
+it("shows a failed initial connection read without a binding and refreshes the same invitation", async () => {
+  museApi.resume.mockResolvedValue({ agent, approvalId: null, binding: null });
+  museApi.connection.mockRejectedValue(new Error("Synthetic Muse connection read failed"));
+  await render(); await click("Muse — Personal agentYour personal Muse at muse.ai");
+  expect(document.body.textContent).toContain("Synthetic Muse connection read failed");
+  expect(document.body.textContent).toContain("Connection updates paused. Refresh to check the latest evidence.");
+  expect(document.querySelector('[aria-label="Muse connection checks"]')).not.toBeNull();
+  expect(museApi.pair).not.toHaveBeenCalled();
+  expect(museApi.verify).not.toHaveBeenCalled();
+  expect(museApi.create).not.toHaveBeenCalled();
+  museApi.connection.mockResolvedValue({ ...museConnection, binding: null });
+  await click("Refresh connection");
+  expect(document.body.textContent).not.toContain("Synthetic Muse connection read failed");
+  expect(document.body.textContent).not.toContain("Connection updates paused");
+  expect(museApi.pair).toHaveBeenCalledExactlyOnceWith("company", agent.id, {});
+  expect(museApi.create).not.toHaveBeenCalled();
+});
