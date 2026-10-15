@@ -30,6 +30,12 @@ proxy boundary; client-supplied forwarding headers alone never mint a budget.
 These limits are per instance process, not a distributed denial-of-service or
 historical-record retention guarantee.
 
+The browser approval page retries only rate-limited challenge reads, up to
+three times. It honors the server delay, or waits sixty seconds when no valid
+delay is provided. Scheduling stops at ten minutes or a known earlier
+challenge expiry. Browser suspension can delay a queued read. The server still
+enforces the original expiry. Approval is never resubmitted automatically.
+
 Cloud front doors must preserve only anonymous challenge creation and
 capability-bound status polling. Approval uses the normal signed-in browser;
 no Cloud user identity is synthesized for the CLI's unauthenticated requests.
