@@ -17,7 +17,7 @@ import express, { type Request } from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { grokBotRoutines, grokBotDispatches, agents, authUsers, companies, companyMemberships, createDb, dotAgentBindings, dotMailboxItems, dotRunnerAssignments, dotRunnerOperations,
-  heartbeatRuns, mcpOauthGrants, issueAttachments, agentWakeupRequests, issueComments, issues, nativeRunResults, nativeRunFinalizations, completionContracts, mcpEventDeliveries, mcpEventSubscriptions, workspaceOperations, workAssessments, statusDecisions, issueThreadInteractions } from "@paperclipai/db";
+  heartbeatRuns, mcpOauthGrants, issueAttachments, activityLog, agentWakeupRequests, issueComments, issues, nativeRunResults, nativeRunFinalizations, completionContracts, mcpEventDeliveries, mcpEventSubscriptions, workspaceOperations, workAssessments, statusDecisions, issueThreadInteractions } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createPublicMcpOAuth, DEVICE_GRANT } from "../services/public-mcp/oauth.js";
 import { createPublicMcpExecutor } from "../services/public-mcp/capabilities.js";
@@ -284,7 +284,19 @@ describe("durable Dot Runner integration", () => {
     expect(uploadError).toBeUndefined(); expect(uploaded?.status).toBe(200);
     expect((await db.select().from(dotRunnerOperations).where(and(eq(dotRunnerOperations.assignmentId, assignment.id), eq(dotRunnerOperations.requestId, operationId))))).toHaveLength(1);
     const attachments = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issue!.id));
-    expect(attachments).toHaveLength(1); expect(attachments[0]).toMatchObject({ createdByAgentId: f.agent.id, originatingRunId: run.id, createdByUserId: null });
+    expect(attachments).toHaveLength(1);
+    const attachment = await issueService(db).getAttachmentById(attachments[0]!.id);
+    expect(attachment).toMatchObject({ companyId: f.company.id, issueId: issue!.id, assetId: attachments[0]!.assetId,
+      createdByAgentId: f.agent.id, originatingRunId: run.id, createdByUserId: null });
+    const audit = await db.select().from(activityLog).where(and(eq(activityLog.companyId, f.company.id),
+      eq(activityLog.action, "issue.attachment_added"), eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issue!.id),
+      sql`${activityLog.details}->>'attachmentId' = ${attachments[0]!.id}`));
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actorType: "agent", actorId: f.agent.id, details: { attachmentId: attachments[0]!.id,
+      authorizingPersonId: f.userId, workSessionId: assignment.id, mcpConnectionId: f.principal.grant.id } });
+    expect(uploaded!.body.attachment).toEqual({ id: attachments[0]!.id, issueId: issue!.id, originalFilename: "concurrent.txt",
+      contentType: "text/plain", byteSize: body.length, sha256: createHash("sha256").update(body).digest("hex"),
+      createdAt: attachment!.createdAt.toISOString() });
     expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]!.status).toBe("accepted");
   }, 30000);
 
