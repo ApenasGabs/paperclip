@@ -14,7 +14,7 @@ function evidence() {
     provenance: { coreRevision: "a".repeat(40), runnerRevision: "b".repeat(40), protocolVersion: 1, mode: "live", profile: "muse-personal", environment: "local" },
     samples, cadence: { from: iso(start), to: iso(expiry), observedIntervals: 17279, withinSevenSeconds: 17000, missingIntervals: 0, maxUnobservedGapMs: 0, complete: true },
     idleWindows: [{ from: iso(start + 6 * HOUR), to: iso(start + 9 * HOUR), coverageComplete: true, healthy: true, activeAssignments: 0, unconsumedInputs: 0 }],
-    cleanup: { authorityRevoked: true, detectorRemovalRequested: true, detectorRemoved: true, workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [],
+    cleanup: { authorityRevoked: true, detectorRemovalRequested: true, detectorRemoved: true, detectorEvidenceSource: "authenticated_worker_report", detectorEvidenceRecordedAt: iso(expiry + 1000), detectorObservationAt: iso(expiry + 1000), workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [],
     workflows: Object.fromEntries(["researchDocument", "clarification", "followUp", "freshConversationProactive"].map(key => [key, { verified: true }])) };
 }
 test("complete live evidence reports claim and full-response latency separately", () => {
@@ -104,9 +104,28 @@ test("deadline cleanup remains incomplete until detector removal is requested an
     assert.ok(report.reasons.includes("deadline_cleanup_not_verified"));
   }
   const complete = qualificationReport(evidence(), expiry + 2000);
-  assert.equal(complete.schema, "paperclip.muse-qualification.v3");
+  assert.equal(complete.schema, "paperclip.muse-qualification.v4");
   assert.equal(complete.qualificationPassed, true); assert.equal(complete.releaseQualified, true);
   assert.equal(complete.deadlineCleanupVerified, true);
   assert.equal(complete.detectorRemovalRequested, true); assert.equal(complete.detectorRemovalReported, true);
   assert.match(complete.evidenceBoundary, /worker-reported, not independently confirmed by the provider/);
+});
+
+
+test("deadline cleanup requires trusted timely provenance and distinguishes operator observation", () => {
+  for (const source of [undefined, "disabled", "public_activity", "operator_summary"]) {
+    const e = evidence(); e.cleanup.detectorEvidenceSource = source;
+    assert.equal(qualificationReport(e, expiry + 2000).qualificationPassed, false);
+  }
+  for (const field of ["detectorEvidenceRecordedAt", "detectorObservationAt"]) {
+    const e = evidence(); e.cleanup[field] = iso(expiry - 1);
+    assert.equal(qualificationReport(e, expiry + 2000).deadlineCleanupVerified, false);
+  }
+  const e = evidence(); e.cleanup.detectorEvidenceSource = "operator_runtime_attestation";
+  const report = qualificationReport(e, expiry + 2000);
+  assert.equal(report.qualificationPassed, true); assert.equal(report.detectorEvidenceSource, "operator_runtime_attestation");
+  assert.match(report.evidenceBoundary, /operator-attested from supported-runtime observation/);
+  assert.doesNotMatch(report.evidenceBoundary, /removal is authenticated worker-reported/);
+  e.cleanup.nativeEffectsUnknown = true;
+  assert.equal(qualificationReport(e, expiry + 2000).qualificationPassed, false);
 });
