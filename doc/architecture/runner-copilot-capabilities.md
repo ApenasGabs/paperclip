@@ -1,9 +1,14 @@
 # Copilot 1.0.88 rich ACP capability audit
 
-Current integration (2026-10-15): **Copilot profile v19 remains pending** with
-digest `sha256:2fec061f29f9cac4f6aa70f9329e1b27ce0c9cf4825030fdbb78979ced9bc201`.
-Current installation verification requires this generated v19 identity. This
+Current integration (2026-10-15): **Copilot profile v20 remains pending** with
+digest `sha256:7fa710c697582b1b4d85cdf833178b1940656cb6efb44ac4d356b2f27e6b3d4b`.
+Current installation verification requires this generated v20 identity. This
 source identity declaration supplies no new paid qualification.
+
+Both profile v19 identities remain historical: upstream credential-observer
+`sha256:38abf359adeef43f1f19230245c6e2051c55fdd79571882ef6f00b7cb2958d93` and Muse
+`sha256:2fec061f29f9cac4f6aa70f9329e1b27ce0c9cf4825030fdbb78979ced9bc201`.
+Neither is the current launch identity.
 
 Historical integration (2026-10-10): **Copilot profile v18 remained pending** with
 digest `sha256:5e79c2b1a42b98a545bafe9e93f8c6b6c423bec1c18dc1f0a3cf48477b757389`.
