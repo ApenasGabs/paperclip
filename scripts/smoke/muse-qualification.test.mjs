@@ -15,7 +15,7 @@ async function fixture(action, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), "muse-qualification-fixture-"));
   const statePath = join(directory, "state.json"), authPath = join(directory, "auth.json");
   const requests = [], issues = new Map(); let qualification; let lostCreate = options.lostCreate ?? true; let failEvidence = false;
-  const model = { assignments: [], run: null, runFailureStatus: 0, issueStatus: "blocked", document: "Synthetic sample report.",
+  const model = { detectorCleanup: null, assignments: [], run: null, runFailureStatus: 0, issueStatus: "blocked", document: "Synthetic sample report.",
     connection: { enabled: true, binding: { id: bindingId, generation: 1, revision: 2, status: "ready", backgroundReplyVerified: true,
       credentialState: "active", refreshExpiresAt: new Date(Date.now() + 30 * 24 * HOUR).toISOString(),
       liveAssignments: 0, uncertainOperations: 0, pendingInputs: 0, lastReceiverContactAt: new Date().toISOString(),
@@ -31,13 +31,14 @@ async function fixture(action, options = {}) {
     if (req.url.includes("/qualification")) {
       if (req.method === "POST") {
         const now = Date.now() - (options.hour ?? 0) * HOUR;
+        model.connection.binding.qualification = { id: body.qualificationId };
         qualification ??= { qualificationId: body.qualificationId, startedAt: new Date(now).toISOString(), expiresAt: new Date(now + 86_400_000).toISOString(), revision: 3 };
         return send(201, qualification);
       }
       if (req.method === "DELETE") { res.statusCode = 204; return res.end(); }
       if (failEvidence) return send(503, { error: "synthetic_unavailable" });
       return send(200, { ...qualification, stoppedAt: null, deadlineEnforcedAt: null, authorityRevoked: false,
-        persistenceLagMs: 30000, cadenceEvidenceComplete: false, contacts: [], assignments: model.assignments, idleWindows: [] });
+        detectorCleanup: model.detectorCleanup, persistenceLagMs: 30000, cadenceEvidenceComplete: false, contacts: [], assignments: model.assignments, idleWindows: [] });
     }
     if (req.method === "GET" && req.url.endsWith("/muse-binding")) return send(200, model.connection);
     if (req.method === "GET" && req.url === "/api/heartbeat-runs/" + runId) return send(model.runFailureStatus || 200, model.run);
@@ -270,7 +271,7 @@ test("retaining one failed slot still fails the unchanged grader after twenty la
       missingIntervals: 0, maxUnobservedGapMs: 0, complete: true },
     idleWindows: [{ from: iso(start + 6 * HOUR), to: iso(start + 9 * HOUR), coverageComplete: true, healthy: true,
       activeAssignments: 0, unconsumedInputs: 0 }],
-    cleanup: { authorityRevoked: true, detectorRemovalRequested: true, detectorRemoved: true, workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [] };
+    cleanup: { authorityRevoked: true, detectorRemovalRequested: true, detectorRemoved: true, detectorEvidenceSource: "authenticated_worker_report", detectorEvidenceRecordedAt: iso(expiry + 1000), detectorObservationAt: iso(expiry + 1000), workerStopUnconfirmed: false, nativeEffectsUnknown: false }, interventions: [] };
   assert.equal(qualificationReport(evidence, expiry + 2000).qualificationPassed, true);
   samples[0] = { slot: 0, queuedAt: samples[0].queuedAt, offeredAt: samples[0].offeredAt,
     nativeSucceeded: false, verdict: "terminal_failure", terminalFailureAt: iso(start + 600_000), unattended: true, attempts: 1 };
@@ -342,5 +343,23 @@ test("qualification report projects only the retained binding generation's authe
       for (const privateId of [companyId, agentId, bindingId]) assert.equal(result.stdout.includes(privateId), false);
     }
     assert.ok(context.requests.slice(before).every(request => request.method === "GET"));
+  });
+});
+
+
+test("qualification projects only exact server-established detector attestation provenance", async () => {
+  await fixture(async context => {
+    assert.equal((await context.run("start")).code, 0);
+    const state = JSON.parse(await readFile(context.statePath, "utf8"));
+    const exact = { bindingId, generation: 1, qualificationId: state.qualificationId, source: "operator_runtime_attestation",
+      recordedAt: new Date().toISOString(), observedAt: new Date().toISOString(), operatorId: "synthetic-private-operator", hookId: "synthetic-private-hook", hookScript: "synthetic-private-script" };
+    for (const change of [{}, { bindingId: "30000000-0000-4000-8000-000000000002" }, { generation: 2 }, { qualificationId: "40000000-0000-4000-8000-000000000002" }]) {
+      context.model.detectorCleanup = { ...exact, ...change };
+      const result = await context.run("report"); assert.equal(result.code, 0, result.stderr);
+      const report = JSON.parse(result.stdout);
+      assert.equal(report.detectorEvidenceSource, Object.keys(change).length ? null : "operator_runtime_attestation");
+      assert.equal(report.qualificationPassed, false);
+      for (const value of [exact.operatorId, exact.hookId, exact.hookScript]) assert.equal(result.stdout.includes(value), false);
+    }
   });
 });

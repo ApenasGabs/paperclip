@@ -1,5 +1,5 @@
 /** Secret-free interpretation of a bounded personal-Muse probe, not a Product E2E campaign. */
-export const MUSE_QUALIFICATION_GRADER = "paperclip.muse-qualification.v3";
+export const MUSE_QUALIFICATION_GRADER = "paperclip.muse-qualification.v4";
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const timestamp = value => typeof value === "string" ? Date.parse(value) : NaN;
@@ -48,7 +48,10 @@ export function qualificationReport(evidence, now = Date.now()) {
   const authorityRevoked = cleanup.authorityRevoked === true;
   const detectorRemovalRequested = cleanup.detectorRemovalRequested === true;
   const detectorRemovalReported = cleanup.detectorRemoved === true;
-  const stopped = authorityRevoked && detectorRemovalRequested && detectorRemovalReported
+  const detectorEvidenceSource = ["authenticated_worker_report", "operator_runtime_attestation"].includes(cleanup.detectorEvidenceSource) ? cleanup.detectorEvidenceSource : null;
+  const detectorEvidenceRecordedAt = timestamp(cleanup.detectorEvidenceRecordedAt), detectorObservationAt = timestamp(cleanup.detectorObservationAt);
+  const detectorEvidenceTimely = detectorEvidenceRecordedAt >= expiry && detectorEvidenceRecordedAt <= now && detectorObservationAt >= expiry && detectorObservationAt <= detectorEvidenceRecordedAt;
+  const stopped = detectorEvidenceSource !== null && detectorEvidenceTimely && authorityRevoked && detectorRemovalRequested && detectorRemovalReported
     && timestamp(run.deadlineEnforcedAt) >= expiry && timestamp(run.deadlineEnforcedAt) <= expiry + 60_000;
   const noUncertainty = cleanup.nativeEffectsUnknown === false && cleanup.workerStopUnconfirmed === false;
   const sourceKnown = sha(provenance.coreRevision) && sha(provenance.runnerRevision)
@@ -91,11 +94,11 @@ export function qualificationReport(evidence, now = Date.now()) {
     fullResponse: distribution(samples.map(sample => duration(sample.queuedAt, sample.finalizedAt))),
     receiverIntervals: intervalsValid ? cadence.observedIntervals : null, fractionWithinSevenSeconds: fraction,
     requestedPollIntervalMs: 5000, cadenceEvidenceComplete: cadenceComplete, sustainedIdleVerified: idleVerified,
-    authorityRevoked, detectorRemovalRequested, detectorRemovalReported,
+    authorityRevoked, detectorRemovalRequested, detectorRemovalReported, detectorEvidenceSource,
     deadlineCleanupVerified: stopped, unresolvedRemoteWork: !noUncertainty,
     usage: null, cost: null, usageAccounting: "unavailable", workflows,
     qualificationPassed: passed, releaseQualified: passed && Object.values(workflows).every(Boolean), reasons,
-    evidenceBoundary: "Authenticated unattended round trips and native receipts; detector removal is authenticated worker-reported, not independently confirmed by the provider. Private Muse tool activity is not independently observed.",
+    evidenceBoundary: `Authenticated unattended round trips and native receipts; detector removal is ${detectorEvidenceSource === "operator_runtime_attestation" ? "operator-attested from supported-runtime observation" : detectorEvidenceSource === "authenticated_worker_report" ? "authenticated worker-reported" : "unconfirmed"}, not independently confirmed by the provider. Private Muse tool activity is not independently observed.`,
   };
 }
 

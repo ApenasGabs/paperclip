@@ -948,6 +948,7 @@ describe("openapi routes", () => {
       ["post", "/api/companies/{companyId}/muse-invitations"],
       ["get", base], ["post", base], ["post", `${base}/verify`],
       ["post", `${base}/revoke`], ["post", `${base}/attest-stop`],
+      ["post", `${base}/attest-detector-cleanup`],
       ["get", `${base}/qualification`], ["post", `${base}/qualification`], ["delete", `${base}/qualification`],
     ];
     for (const [method, routePath] of operations) {

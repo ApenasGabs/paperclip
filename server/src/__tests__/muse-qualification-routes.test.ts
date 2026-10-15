@@ -4,7 +4,7 @@ import request from "supertest";
 import type { Db } from "@paperclipai/db";
 import { museQualificationRoutes } from "../routes/muse-qualification.js";
 import { museBoardRoutes } from "../routes/muse.js";
-const mocks = vi.hoisted(() => ({ beginQualification: vi.fn(), endQualification: vi.fn(), readQualificationEvidence: vi.fn(), verify: vi.fn(), decide: vi.fn(), getById: vi.fn() }));
+const mocks = vi.hoisted(() => ({ beginQualification: vi.fn(), endQualification: vi.fn(), readQualificationEvidence: vi.fn(), verify: vi.fn(), attestDetectorCleanup: vi.fn(), decide: vi.fn(), getById: vi.fn() }));
 vi.mock("../services/muse-runner-broker.js", () => ({ museRunnerBroker: () => mocks }));
 vi.mock("../services/access.js", () => ({ accessService: () => mocks }));
 vi.mock("../services/authorization.js", () => ({ authorizationService: () => mocks }));
@@ -92,5 +92,26 @@ describe("board Muse verification attribution", () => {
     expect((await request(app()).post(verifyPath).send(verifyBody)).status).toBe(403);
     expect((await request(app({ type: "board", source: "board_key", userId: "operator", companyIds: [] })).post(verifyPath).send(verifyBody)).status).toBe(403);
     expect(mocks.verify).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("board-only exact Muse detector cleanup", () => {
+  const cleanupPath = `/companies/${companyId}/agents/${agentId}/muse-binding/attest-detector-cleanup`;
+  const input = { bindingId, qualificationId, generation: 1, expectedRevision: 2, hookScript: `~/hooks/scripts/paperclip-muse-${bindingId}.sh`, detectorRemoved: true,
+    observation: { method: "hooks.list", includeDisabled: true, hookId: "test-hook", outcome: "exact_hook_absent", observedAt: "2099-01-02T00:00:01.000Z", sha256: "a".repeat(64) } };
+  it("uses actual Board caller and normal change-grant authorization", async () => {
+    const actor = { type: "board", source: "session", userId: "actual-operator", companyIds: [companyId] };
+    const response = await request(app(actor)).post(cleanupPath).send(input);
+    expect(response.status).toBe(200); expect(response.headers["cache-control"]).toBe("no-store");
+    expect(mocks.attestDetectorCleanup).toHaveBeenCalledExactlyOnceWith(companyId, agentId, "actual-operator", input, actor);
+    expect(mocks.decide).toHaveBeenCalledWith(expect.objectContaining({ action: "agent_config:update", scope: { requiresChangeGrant: true } }));
+  });
+  it("rejects denied authority, agent callers, cross-company callers and supplied actor metadata", async () => {
+    mocks.decide.mockResolvedValueOnce({ allowed: false, explanation: "Denied" });
+    expect((await request(app()).post(cleanupPath).send(input)).status).toBe(403);
+    for (const actor of [{ type: "agent", source: "agent_key", agentId, companyId }, { type: "board", source: "board_key", userId: "operator", companyIds: [] }]) expect((await request(app(actor)).post(cleanupPath).send(input)).status).toBe(403);
+    expect((await request(app()).post(cleanupPath).send({ ...input, operatorId: "spoofed" })).status).toBe(400);
+    expect(mocks.attestDetectorCleanup).not.toHaveBeenCalled();
   });
 });
