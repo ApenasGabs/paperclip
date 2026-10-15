@@ -57,6 +57,20 @@ async function permissionPolicyClosure(extraClassifierImport = false): Promise<S
     ? path : pathToFileURL(resolve(root, path)).href));
 }
 
+async function withCopilotTestPlatform<T>(arch: "x64" | "arm64", run: () => Promise<T>): Promise<T> {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const archDescriptor = Object.getOwnPropertyDescriptor(process, "arch");
+  if (!platformDescriptor || !archDescriptor) throw new Error("Missing process platform descriptors");
+  try {
+    Object.defineProperty(process, "platform", { ...platformDescriptor, value: "linux" });
+    Object.defineProperty(process, "arch", { ...archDescriptor, value: arch });
+    return await run();
+  } finally {
+    try { Object.defineProperty(process, "platform", platformDescriptor); }
+    finally { Object.defineProperty(process, "arch", archDescriptor); }
+  }
+}
+
 vi.mock("./installation-integrity.js", () => ({ verifyNativeAcpxInstallation: vi.fn() }));
 
 describe("Copilot build-owned installation", () => {
@@ -197,7 +211,7 @@ describe("Copilot build-owned installation", () => {
       expect(COPILOT_CLOSURE_SHA256[platform as keyof typeof COPILOT_CLOSURE_SHA256]).toBe(digest);
     }
   });
-  it("ignores ambient executable selection and supplies only pinned native launch inputs", async () => {
+  it("ignores ambient executable selection and supplies only pinned native launch inputs", () => withCopilotTestPlatform("x64", async () => {
     const openCommand = vi.fn();
     vi.mocked(verifyNativeAcpxInstallation).mockResolvedValueOnce({ commandDigest: "sha256:closure", agentServerPackageJsonPath: "/verified/closure.json", agentRuntimePackageJsonPath: null, openCommand });
     const before = process.env.COPILOT_PATH;
@@ -214,7 +228,12 @@ describe("Copilot build-owned installation", () => {
       expect(result.commandDigest).toBe(QUALIFIED_ACPX_PROFILES.copilot.commandDigest);
       expect(result.openCommand).toBe(openCommand);
     } finally { if (before === undefined) delete process.env.COPILOT_PATH; else process.env.COPILOT_PATH = before; }
-  });
+  }));
+  it("rejects an unpinned linux-arm64 distribution before native file access", () => withCopilotTestPlatform("arm64", async () => {
+    vi.mocked(verifyNativeAcpxInstallation).mockClear();
+    await expect(verifyCopilotInstallation(QUALIFIED_ACPX_PROFILES.copilot)).rejects.toThrow(/^Copilot native distribution is not pinned for linux-arm64$/);
+    expect(verifyNativeAcpxInstallation).not.toHaveBeenCalled();
+  }));
   it("rejects changed profile identities before native file access", async () => {
     vi.mocked(verifyNativeAcpxInstallation).mockClear();
     for (const override of [{ agentServerVersion: "latest" }, { commandDigest: "sha256:untrusted" }, { commandDigest: "sha256:ed39259990cb0efda48d6105d2fa3599aac76873eb75cd80b4d0b179ce0579a6" }, { agent: "cursor" }, { agentProfileVersion: 1 }, { agentProfileVersion: 2 }, { agentProfileVersion: 3 }, { agentProfileVersion: 4 }, { agentProfileVersion: 5 }, { agentProfileVersion: 6 }, { agentProfileVersion: 7 }, { agentProfileVersion: 8 }, { agentProfileVersion: 9 }, { agentProfileVersion: 10 }, { agentProfileVersion: 17 }, { agentProfileVersion: 18 }]) {

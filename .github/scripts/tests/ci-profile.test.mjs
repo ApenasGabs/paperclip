@@ -9,7 +9,7 @@ import { buildTrace } from "../../../scripts/ci-profile/trace.mjs";
 import { sendEvents } from "../../../scripts/ci-profile/export.mjs";
 import { associatedProfilePr, ciOwners, trustedOwnerIds } from "../../../scripts/ci-profile/authorize.mjs";
 
-const prJobSecretReference = /HONEYCOMB.*KEY|\$\{\{(?:'(?:[^']|'')*'|(?!\}\})[^'])*\bsecrets\s*(?:\.|\[)/;
+const prJobSecretReference = /HONEYCOMB.*KEY|\$\{\{(?:'(?:[^']|'')*'|(?!\}\})[^'])*\bsecrets\b/;
 const at = (seconds) => new Date(1_800_000_000_000 + seconds * 1000).toISOString();
 const run = {
   id: 42, run_attempt: 1, run_number: 7, status: "completed", conclusion: "failure",
@@ -243,6 +243,7 @@ test("PR jobs reject secret expressions without rejecting secret test filenames"
     "${{ failure() && secrets.EXAMPLE_TOKEN }}", "${{\n secrets.EXAMPLE_TOKEN\n}}",
     "${{ format('{0}', secrets.EXAMPLE_TOKEN) }}",
     "${{ format('}}', secrets.EXAMPLE_TOKEN) }}",
+    "${{ toJSON(secrets) }}",
     "HONEYCOMB_CI_API_KEY",
   ]) assert.match(reference, prJobSecretReference);
 });

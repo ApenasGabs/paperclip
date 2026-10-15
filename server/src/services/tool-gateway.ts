@@ -1328,7 +1328,9 @@ export function createToolGatewayService(
 
   async function connectedMcpToolsForCompany(
     companyId: string,
+    selectedConnectionIds?: string[],
   ): Promise<ToolGatewayDescriptor[]> {
+    if (selectedConnectionIds?.length === 0) return [];
     // Read each connection and application row once. Selecting them in the
     // catalog join repeats the full connection row (config included) for
     // every tool, and one connection can expose hundreds of tools. Both reads
@@ -1354,6 +1356,7 @@ export function createToolGatewayService(
               eq(toolCatalogEntries.status, "active"),
               isNull(toolCatalogEntries.quarantinedAt),
               connectedMcpConnectionFilter(companyId),
+              selectedConnectionIds ? inArray(toolConnections.id, selectedConnectionIds) : undefined,
             ),
           )
           .orderBy(toolConnections.name, toolCatalogEntries.name);
@@ -9135,19 +9138,30 @@ export function createToolGatewayService(
 
     async browserUseResources(binding: { companyId: string; agentId: string; runId?: string; issueId?: string }) {
       if (!binding.runId || !binding.issueId) return [];
-      const [connection] = await measureRunPhase("connectors.browser_use.connection", () => db.select({ id: toolConnections.id }).from(toolConnections).where(and(
+      const connections = await measureRunPhase("connectors.browser_use.connection", () => db.select({ id: toolConnections.id }).from(toolConnections).where(and(
         eq(toolConnections.companyId, binding.companyId), eq(toolConnections.transport, "rest_api"),
         eq(toolConnections.enabled, true), eq(toolConnections.status, "active"),
         sql`${toolConnections.config}->>'sourceTemplateKey' = 'browser-use-cloud'`,
-      )).limit(1));
-      if (!connection) return [];
+      )).orderBy(toolConnections.name, toolConnections.id));
+      if (!connections.length) return [];
       const session: ToolGatewaySession = { ...binding, runId: binding.runId, issueId: binding.issueId, id: randomUUID(), token: "", projectId: null, createdAt: new Date(), expiresAt: new Date(Date.now() + 60000) };
-      const tools = (await measureRunPhase("connectors.browser_use.catalog", () => listToolsForContext(session))).filter(t => t.providerType === "provider_rest");
+      await assertAgentInCompany(binding.companyId, binding.agentId);
+      if (await githubGuestBotConnectionForSession(db, session)) return [];
+      const tools = await measureRunPhase("connectors.browser_use.catalog", async () => {
+        const candidates = await connectedMcpToolsForCompany(binding.companyId, connections.map(connection => connection.id));
+        const decisions = await decideToolsForListing(candidates, tool => policyInputForTool({ session, tool }));
+        return decisions.filter(({ decision }) => decision.allowed || decision.decision === "require_approval").map(({ tool }) => tool);
+      });
+      const visible = new Set(tools.map(tool => tool.connectionId));
       const resources: Array<{ id: string; label: string; connectionId: string }> = [];
-      for (const connectionId of new Set(tools.map(t => t.connectionId!))) {
-        const [connection] = await measureRunPhase("connectors.browser_use.connection", () => db.select().from(toolConnections).where(and(eq(toolConnections.companyId, binding.companyId), eq(toolConnections.id, connectionId))));
+      for (const candidate of connections) {
+        if (!visible.has(candidate.id)) continue;
+        const [connection] = await measureRunPhase("connectors.browser_use.connection", () => db.select().from(toolConnections).where(and(
+          eq(toolConnections.companyId, binding.companyId), eq(toolConnections.id, candidate.id),
+          eq(toolConnections.enabled, true), eq(toolConnections.status, "active"),
+        )));
         if (!connection || !isBrowserUseConnection(connection)) continue;
-        try { await measureRunPhase("connectors.browser_use.grant", () => resolveConnectionGrant(session, connection, false)); resources.push({ id: connectionId, connectionId, label: "Browser Use Cloud" }); } catch { /* Unavailable grants do not contribute a runtime skill. */ }
+        try { await measureRunPhase("connectors.browser_use.grant", () => resolveConnectionGrant(session, connection, false)); resources.push({ id: connection.id, connectionId: connection.id, label: "Browser Use Cloud" }); } catch { /* Unavailable grants do not contribute a runtime skill. */ }
       }
       return resources;
     },
