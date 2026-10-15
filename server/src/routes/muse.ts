@@ -1,7 +1,7 @@
 import express, { Router, type Request } from "express";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { MUSE_PUBLIC_ROUTES, MUSE_MAX_BODY_BYTES, MUSE_OAUTH_SCOPES, MUSE_RESOURCE_PATH, musePairSchema, museRefreshSchema, museCommandSchema, museQuerySchema, museCleanupSchema, museDetectorCleanupSchema, museStopBoundarySchema } from "@paperclipai/shared";
+import { MUSE_PUBLIC_ROUTES, MUSE_MAX_BODY_BYTES, MUSE_OAUTH_SCOPES, MUSE_RESOURCE_PATH, musePairSchema, museRefreshSchema, museCommandSchema, museQuerySchema, museCleanupSchema, museDetectorCleanupSchema, museStopBoundarySchema, museDetectorCleanupAttestationSchema } from "@paperclipai/shared";
 import { museExternalAgents } from "../modules/external-agents/index.js";
 import { museIdentity } from "../services/muse-identity.js";
 import { museOAuth } from "../services/muse-oauth.js";
@@ -100,6 +100,7 @@ export function museBoardRoutes(db:Db,publicOrigin?:string) {
   router.post(path,async(req,res)=>{const s=await scope(req,true),input=z.object({replaceBindingId:z.uuid().optional(),expectedRevision:z.number().int().positive().optional()}).strict().parse(req.body??{});res.set("Cache-Control","no-store").status(201).json(await broker.createPairing({...s,agentId:s.agentId!,...input}));});
   router.post(path+"/verify",async(req,res)=>{const s=await scope(req,true);res.json(await broker.verify(s.companyId,s.agentId!,identitySchema.parse(req.body),s.operatorId));});
   router.post(path+"/revoke",async(req,res)=>{const s=await scope(req,true);await broker.revoke(s.companyId,s.agentId!,s.operatorId,identitySchema.parse(req.body));res.status(204).end();});
+  router.post(path+"/attest-detector-cleanup",async(req,res)=>{const s=await scope(req,true);res.set("Cache-Control","no-store").json(await broker.attestDetectorCleanup(s.companyId,s.agentId!,s.operatorId,museDetectorCleanupAttestationSchema.parse(req.body),req.actor));});
   router.post(path+"/attest-stop",async(req,res)=>{const s=await scope(req,true),input=z.object({boundary:museStopBoundarySchema,expectedRevision:z.number().int().positive(),workerStopped:z.literal(true)}).strict().parse(req.body);res.json(await broker.attestStop(s.companyId,s.agentId!,s.operatorId,input));});
   return router;
 }

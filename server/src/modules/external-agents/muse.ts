@@ -6,7 +6,7 @@ import { agents, companies, projects, activityLog, heartbeatRuns, issues, issueC
   museMailboxItems as mailbox, museInputDeliveries as inputs, museIdleReceipts as idleReceipts, externalAgentHolds as holds,
   museReceiverContactBuckets, mcpOauthGrants, mcpOauthTokens, type Db } from "@paperclipai/db";
 import { MUSE_TICKET_TTL_MS, MUSE_CLEANUP_TTL_MS, MUSE_RESOURCE_PATH, museStopBoundarySchema, MUSE_ASSET_VERSION, type AgentConnectionSubject, type MuseBinding, type MuseCommand,
-  type MuseQuery, type MusePairing, type MuseStopBoundary, type MuseQualificationEvidence, type MuseQualificationBeginResult } from "@paperclipai/shared";
+  type MuseQuery, type MusePairing, type MuseStopBoundary, type MuseQualificationEvidence, type MuseQualificationBeginResult, museDetectorCleanupAttestationSchema, type MuseDetectorCleanupEvidence, type MuseDetectorCleanupAttestationInput } from "@paperclipai/shared";
 import { externalOperationDigest, parsePaperclipQuestionSet, type MuseBindingSnapshot, type ExternalProviderPort, type ExternalProviderOperation } from "../../vendor/paperclip-runner/index.js";
 import { conflict, forbidden, notFound, unprocessable } from "../../errors.js";
 import { museIdentity, museCredentialHash, assertMuseCurrentAuthority, assertMuseSubjectCredential, inspectMuseConnectionCredential, assertMuseCleanupCredential, museCleanupBoundaryIds, assertMuseDisabledStopControlCredential, museStopControlBoundaryIds } from "../../services/muse-identity.js";
@@ -132,6 +132,27 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
     assertSubjectCredential:async(tx,s)=>{await assertMuseSubjectCredential(tx,s,s.credentialSource==="oauth"?connectionResource():undefined);},
     authorize:async(s,id,settled)=>{const {b,a}=await authorizeAssignment(s,id,settled);return {binding:b,assignment:a};}});
   const operation=nativeBroker.operation;
+  const detectorHook=(b:typeof bindings.$inferSelect)=>`~/hooks/scripts/paperclip-muse-${b.id}.sh`;
+  async function detectorEvidence(database:Db|ExternalAdmissionTransaction,b:typeof bindings.$inferSelect):Promise<MuseDetectorCleanupEvidence|null> {
+    if(!b.detectorRemovedAt)return null;
+    const rows=await database.select().from(activityLog).where(and(eq(activityLog.companyId,b.companyId),eq(activityLog.entityType,"agent"),eq(activityLog.entityId,b.agentId),eq(activityLog.agentId,b.agentId),
+      inArray(activityLog.action,["muse.detector_cleanup_attested","muse.detector_removal_reported"]),
+      sql`${activityLog.details}->>'bindingId' = ${b.id}`,sql`${activityLog.details}->>'generation' = ${String(b.generation)}`,
+      sql`((${activityLog.actorType}='user' and ${activityLog.action}='muse.detector_cleanup_attested' and ${activityLog.responsibleUserId}=${activityLog.actorId}) or (${activityLog.actorType}='agent' and ${activityLog.action}='muse.detector_removal_reported' and ${activityLog.actorId}=${b.agentId} and ${activityLog.responsibleUserId}=${b.operatorId}))`)).orderBy(sql`case when ${activityLog.action}='muse.detector_cleanup_attested' then 0 else 1 end`,desc(activityLog.createdAt)).limit(2);
+    for(const row of rows) {
+      const d=row.details??{},operator=row.action==="muse.detector_cleanup_attested";
+      if(operator&&(d.source!=="operator_runtime_attestation"||d.qualificationId!==b.qualificationId||d.hookScript!==detectorHook(b)||d.recordedAt!==b.detectorRemovedAt.toISOString()||typeof d.observedAt!=="string"||!Number.isFinite(Date.parse(d.observedAt))||d.method!=="hooks.list"||d.includeDisabled!==true||typeof d.hookId!=="string"||!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(d.hookId)||d.outcome!=="exact_hook_absent"))continue;
+      const recordedAt=operator?b.detectorRemovedAt:row.createdAt;
+      return {bindingId:b.id,generation:b.generation,qualificationId:b.qualificationId,hookScript:detectorHook(b),source:operator?"operator_runtime_attestation":"authenticated_worker_report",recordedAt:recordedAt.toISOString(),observedAt:operator?d.observedAt as string:recordedAt.toISOString(),operatorId:operator?row.actorId:null,hookId:operator?d.hookId as string:null};
+    }
+    return null;
+  }
+  function staleWorkerDetectorEvidence(b:typeof bindings.$inferSelect,evidence:MuseDetectorCleanupEvidence) {
+    return evidence.source==="authenticated_worker_report"&&(Date.parse(evidence.recordedAt)<(b.revokedAt?.getTime()??Infinity)||!!b.qualificationExpiresAt&&Date.parse(evidence.recordedAt)<b.qualificationExpiresAt.getTime());
+  }
+  function detectorAttestationEligible(b:typeof bindings.$inferSelect) {
+    return b.status==="revoked"&&!!b.revokedAt&&(!b.qualificationId||!!b.qualificationExpiresAt&&b.qualificationExpiresAt<=new Date()&&!!b.deadlineEnforcedAt&&b.deadlineEnforcedAt>=b.qualificationExpiresAt&&b.revokedAt>=b.qualificationExpiresAt);
+  }
   const broker={
     enabled:identity.enabled,
     async createPairing(input:{companyId:string;agentId:string;operatorId:string;replaceBindingId?:string;expectedRevision?:number}):Promise<MusePairing> {
@@ -174,12 +195,13 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
       const pending=await db.select({id:inputs.id}).from(inputs).innerJoin(assignments,eq(assignments.id,inputs.assignmentId)).where(and(eq(assignments.companyId,companyId),eq(assignments.agentId,agentId),inArray(assignments.status,["offered","claimed","accepted"]),isNull(inputs.consumedAt)));
       const [stop]=await db.select().from(holds).where(and(eq(holds.companyId,companyId),eq(holds.agentId,agentId),eq(holds.provider,"muse"),isNull(holds.releasedAt))).orderBy(desc(holds.createdAt)).limit(1);
       const [stopBinding]=stop?.stopBoundary ? await db.select({revision:bindings.revision}).from(bindings).where(and(eq(bindings.id,stop.stopBoundary.bindingId),eq(bindings.generation,stop.stopBoundary.generation),eq(bindings.companyId,companyId),eq(bindings.agentId,agentId))) : [];
+      const cleanupEvidence=await detectorEvidence(db,b);
       const credential=await inspectMuseConnectionCredential(db,b,b.grantId?connectionResource():undefined);
       return {id:b.id,generation:b.generation,revision:b.revision,status:b.status,paired:!!b.pairedAt,receiverDetected:!!b.receiverContactAt,backgroundReplyVerified:!!b.verifiedReplyAt,
         pairingExpiresAt:iso(b.ticketExpiresAt),challengeExpiresAt:iso(b.challengeExpiresAt),lastReceiverContactAt:iso(b.receiverContactAt),lastWorkerActivityAt:iso(b.workerActivityAt),lastVerifiedReplyAt:iso(b.verifiedReplyAt),credentialState:credential.state,refreshExpiresAt:credential.refreshExpiresAt,receiverContactTrust:"public_untrusted",contactPersistenceLagMs:30000,clientVersion:b.clientVersion,
         qualification:b.qualificationId&&b.qualificationExpiresAt?{id:b.qualificationId,expiresAt:b.qualificationExpiresAt.toISOString()}:null,
         liveAssignments:live.length,uncertainOperations:unknown.length,pendingInputs:pending.length,
-        cleanup:{authenticatedAfterRevocation:!b.grantId,detectorRemovalRequested:!!b.detectorRemovalRequestedAt,pending:!!b.cleanupExpiresAt&&b.cleanupExpiresAt>new Date()&&(!b.detectorRemovedAt||!!stop),detectorRemoved:!!b.detectorRemovedAt,workerQuiescenceReported:!!stop?.workerReportedAt,expiresAt:b.grantId?null:iso(b.cleanupExpiresAt)},
+        cleanup:{detectorEvidence:cleanupEvidence,attestationEligible:detectorAttestationEligible(b)&&(!cleanupEvidence||staleWorkerDetectorEvidence(b,cleanupEvidence)),hookScript:detectorHook(b),authenticatedAfterRevocation:!b.grantId,detectorRemovalRequested:!!b.detectorRemovalRequestedAt,pending:!!b.cleanupExpiresAt&&b.cleanupExpiresAt>new Date()&&(!b.detectorRemovedAt||!!stop),detectorRemoved:!!b.detectorRemovedAt,workerQuiescenceReported:!!stop?.workerReportedAt,expiresAt:b.grantId?null:iso(b.cleanupExpiresAt)},
         stop:{status:!stop?.stopBoundary?"none":stop.operatorAttestedAt?"operator_attested":stop.workerReportedAt?"worker_reported":"cannot_confirm",nativeEffectsUnknown:!!stop?.nativeEffectsUnknown,boundary:stop?.stopBoundary??null,bindingRevision:stopBinding?.revision??null}};
     },
     async snapshot(companyId:string,agentId:string,bindingId:string):Promise<MuseBindingSnapshot> {
@@ -235,6 +257,32 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
         await logActivity(tx as unknown as Db,{companyId,actorType:"user",actorId:operatorId,action:"muse.worker_stop_attested",entityType:"agent",entityId:agentId,details:{bindingId:b.id,assignmentId:boundary.assignmentId,stopNonce:boundary.stopNonce,nativeEffectsUnknown:hold.nativeEffectsUnknown,externalStopConfirmed:false}});
         return {status:"operator_attested",nativeEffectsUnknown:hold.nativeEffectsUnknown,externalStopConfirmed:false};
       }));
+    },
+    async attestDetectorCleanup(companyId:string,agentId:string,operatorId:string,value:MuseDetectorCleanupAttestationInput,actor:AuthorizationActor) {
+      const input=museDetectorCleanupAttestationSchema.parse(value),publications:ActivityPublication[]=[];
+      const result=await db.transaction(tx=>withExternalAdmissionGuard(tx,companyId,agentId,async()=>{
+        const [b]=await tx.select().from(bindings).where(and(eq(bindings.companyId,companyId),eq(bindings.agentId,agentId))).orderBy(desc(bindings.generation)).limit(1).for("update");
+        if(!b||b.id!==input.bindingId||b.generation!==input.generation||b.qualificationId!==input.qualificationId||input.hookScript!==detectorHook(b)||!detectorAttestationEligible(b))throw conflict("Detector cleanup scope changed or its deadline has not ended. Refresh before attesting.");
+        if(actor.type!=="board"||actor.userId!==operatorId)throw forbidden("A current Board operator is required.");
+        const decision=await authorizationService(tx).decide({actor,action:"agent_config:update",resource:{type:"agent",companyId,agentId},scope:{requiresChangeGrant:true}});
+        if(!decision.allowed)throw forbidden(decision.explanation);
+        const digest=externalOperationDigest("tool",{input,operatorId});
+        const prior=await detectorEvidence(tx,b);
+        if(prior&&!staleWorkerDetectorEvidence(b,prior)) {
+          const [same]=await tx.select({id:activityLog.id}).from(activityLog).where(and(eq(activityLog.companyId,companyId),eq(activityLog.entityType,"agent"),eq(activityLog.entityId,agentId),eq(activityLog.agentId,agentId),eq(activityLog.action,"muse.detector_cleanup_attested"),eq(activityLog.actorType,"user"),eq(activityLog.actorId,operatorId),eq(activityLog.responsibleUserId,operatorId),sql`${activityLog.details}->>'inputDigest' = ${digest}`,sql`${activityLog.details}->>'bindingId' = ${b.id}`,sql`${activityLog.details}->>'generation' = ${String(b.generation)}`)).limit(1);
+          if(same&&b.revision===input.expectedRevision+1&&prior.source==="operator_runtime_attestation")return {revision:b.revision,evidence:prior};
+          throw conflict("Detector cleanup was already recorded or the connection changed.");
+        }
+        if(b.revision!==input.expectedRevision)throw conflict("Connection changed. Refresh before attesting.");
+        const now=new Date(),observedAt=new Date(input.observation.observedAt);
+        if(observedAt<b.revokedAt!||observedAt>now||(b.qualificationExpiresAt&&observedAt<b.qualificationExpiresAt))throw conflict("Use an observation made after revocation and the qualification deadline, not a future observation.");
+        await tx.update(bindings).set({detectorRemovalRequestedAt:b.detectorRemovalRequestedAt??now,detectorRemovedAt:now,revision:b.revision+1,updatedAt:now}).where(eq(bindings.id,b.id));
+        await logActivity(tx as unknown as Db,{companyId,actorType:"user",actorId:operatorId,agentId,responsibleUserIdOverride:operatorId,action:"muse.detector_cleanup_attested",entityType:"agent",entityId:agentId,
+          details:{bindingId:b.id,generation:b.generation,qualificationId:b.qualificationId,expectedRevision:input.expectedRevision,revision:b.revision+1,source:"operator_runtime_attestation",hookScript:detectorHook(b),method:input.observation.method,includeDisabled:true,hookId:input.observation.hookId,outcome:input.observation.outcome,observedAt:observedAt.toISOString(),observationSha256:input.observation.sha256,recordedAt:now.toISOString(),inputDigest:digest,externalStopConfirmed:false}},publications);
+        return {revision:b.revision+1,evidence:{bindingId:b.id,generation:b.generation,qualificationId:b.qualificationId,hookScript:detectorHook(b),source:"operator_runtime_attestation" as const,recordedAt:now.toISOString(),observedAt:observedAt.toISOString(),operatorId,hookId:input.observation.hookId}};
+      }));
+      for(const publication of publications){try{publishActivity(publication);}catch{}}
+      return result;
     },
     async reconcileTerminalAssignments(companyId:string,agentId:string,bindingId:string) {
       await db.transaction(tx=>withExternalAdmissionGuard(tx,companyId,agentId,async()=>{
@@ -316,7 +364,7 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
         for(const at of ingress.slice(1)){if(at-previous>30_000){append(start,previous);start=at;}previous=at;}
         if(start!==undefined)append(start,previous);
       }
-      return {qualificationId,startedAt:startedAt.toISOString(),expiresAt:b.qualificationExpiresAt!.toISOString(),stoppedAt:iso(b.revokedAt),deadlineEnforcedAt:iso(b.deadlineEnforcedAt),authorityRevoked:!!b.revokedAt,
+      return {detectorCleanup:await detectorEvidence(db,b),qualificationId,startedAt:startedAt.toISOString(),expiresAt:b.qualificationExpiresAt!.toISOString(),stoppedAt:iso(b.revokedAt),deadlineEnforcedAt:iso(b.deadlineEnforcedAt),authorityRevoked:!!b.revokedAt,
         contacts:contacts.map(c=>({trust:"public_untrusted" as const,replicaId:c.replicaId,bucketAt:c.bucketAt.toISOString(),firstAt:c.timestamps[0]!,lastAt:c.timestamps.at(-1)!,contacts:c.timestamps.length,gapsAtMostSevenSeconds:c.gapsAtMostSevenSeconds,maxGapMs:c.maxGapMs,timestamps:c.timestamps,incomplete:c.incomplete})),
         assignments:samples.map(({runFinishedAt:_runFinishedAt,...a})=>({...a,offeredAt:a.offeredAt.toISOString(),claimedAt:iso(a.claimedAt),nativeAcceptedAt:iso(a.nativeAcceptedAt),acceptedResultAt:iso(a.acceptedResultAt),finalizedAt:iso(a.finalizedAt)})),idleWindows,persistenceLagMs:30000,cadenceEvidenceComplete:!b.cadenceEvidenceIncompleteAt&&!contacts.some(c=>c.incomplete)&&contactRows.length<contactLimit&&samples.length<100&&inputPeriods.length<1000&&runPeriods.length<1000&&holdPeriods.length<1000&&!!b.revokedAt};
     },

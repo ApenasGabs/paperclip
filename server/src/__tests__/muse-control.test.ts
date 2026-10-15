@@ -20,7 +20,7 @@ import { inspectMuseConnectionCredential, assertMuseSubjectCredential } from "..
 import { sql } from "drizzle-orm";
 import { museIdentity, museCredentialHash } from "../services/muse-identity.js";
 import * as museIdentityModule from "../services/muse-identity.js";
-import { museTransportRoutes } from "../routes/muse.js";
+import { museTransportRoutes, museBoardRoutes } from "../routes/muse.js";
 import { activityRoutes } from "../routes/activity.js";
 import * as activityLogModule from "../services/activity-log.js";
 import { errorHandler } from "../middleware/error-handler.js";
@@ -86,6 +86,100 @@ describe("personal Muse control plane",()=>{
     const [assignment]=await db.select().from(assignments).where(eq(assignments.runId,runId));
     return {...f,runId,issue,port,ref,assignment,sent,detach};
   }
+  async function detectorCleanupFixture(provided?:Awaited<ReturnType<typeof oauthFixture>>) {
+    const f=provided??await oauthFixture(true),qualificationId=randomUUID(),expiresAt=new Date(Date.now()-60_000);
+    await db.update(bindings).set({qualificationId,qualificationStartedAt:new Date(expiresAt.getTime()-86_400_000),qualificationExpiresAt:expiresAt}).where(eq(bindings.id,f.binding.id));
+    await f.broker.endQualification({companyId:f.company.id,agentId:f.agent.id,bindingId:f.binding.id,qualificationId,operatorId:f.operatorId});
+    const [binding]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));
+    const input={bindingId:binding.id,generation:binding.generation,expectedRevision:binding.revision,qualificationId,hookScript:`~/hooks/scripts/paperclip-muse-${binding.id}.sh`,detectorRemoved:true as const,
+      observation:{method:"hooks.list" as const,includeDisabled:true as const,hookId:"paperclip-synthetic-hook",outcome:"exact_hook_absent" as const,observedAt:new Date().toISOString(),sha256:"d".repeat(64)}};
+    const app=express();app.use(express.json());app.use((req,_res,next)=>{Object.assign(req,{actor:{type:"board",source:"session",userId:f.operatorId,companyIds:[f.company.id]}});next();});app.use(museBoardRoutes(db,oauthOrigin));app.use(activityRoutes(db));app.use(errorHandler);
+    const path=`/companies/${f.company.id}/agents/${f.agent.id}/muse-binding/attest-detector-cleanup`;
+    return {...f,binding,input,app,path};
+  }
+  it("records exact supported-runtime detector removal after OAuth expiry without restoring worker authority",async()=>{
+    const f=await detectorCleanupFixture();
+    await expect(f.identity.authenticateOAuthAccess(f.tokens!.access_token,oauthOrigin)).rejects.toThrow();
+    const beforeTokens=await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!));
+    const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.agentId,f.agent.id));
+    await instanceSettingsService(db).updateExperimental({enableMuse:false});
+    try {
+      const result=await request(f.app).post(f.path).send(f.input);expect(result.status).toBe(200);expect(result.headers["cache-control"]).toBe("no-store");
+      expect(result.body).toMatchObject({revision:f.binding.revision+1,evidence:{source:"operator_runtime_attestation",operatorId:f.operatorId,hookId:f.input.observation.hookId,bindingId:f.binding.id,generation:f.binding.generation,qualificationId:f.input.qualificationId}});
+      const projected=await f.broker.bindingForAgent(f.company.id,f.agent.id);expect(projected!.cleanup.detectorEvidence).toEqual(result.body.evidence);expect(projected!.cleanup.attestationEligible).toBe(false);
+      const evidence=await f.broker.readQualificationEvidence(f.company.id,f.agent.id,f.binding.id,f.input.qualificationId);expect(evidence.detectorCleanup).toEqual(result.body.evidence);
+      expect((await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!)))).toEqual(beforeTokens);expect((await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.agentId,f.agent.id)))).toEqual(beforeHolds);
+      await expect(f.identity.authenticateOAuthAccess(f.tokens!.access_token,oauthOrigin)).rejects.toThrow();
+      const rows=await db.select().from(activityLog).where(and(eq(activityLog.entityId,f.agent.id),eq(activityLog.action,"muse.detector_cleanup_attested")));expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({actorType:"user",actorId:f.operatorId,responsibleUserId:f.operatorId,agentId:f.agent.id});
+      expect(rows[0].details).toMatchObject({method:"hooks.list",includeDisabled:true,outcome:"exact_hook_absent",externalStopConfirmed:false});
+      expect(JSON.stringify(rows)).not.toContain(f.tokens!.access_token);expect(JSON.stringify(rows)).not.toContain(f.tokens!.refresh_token);
+    }finally{await instanceSettingsService(db).updateExperimental({enableMuse:true});}
+  });
+  it.each(["generation","revision","qualification","script","binding"])("rejects stale detector cleanup %s",async field=>{
+    const f=await detectorCleanupFixture(),input=structuredClone(f.input);
+    if(field==="generation")input.generation++;if(field==="revision")input.expectedRevision++;if(field==="qualification")input.qualificationId=randomUUID();if(field==="binding")input.bindingId=randomUUID();if(field==="script")input.hookScript="~/hooks/scripts/other.sh";
+    expect((await request(f.app).post(f.path).send(input)).status).toBe(409);
+    const [b]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));expect(b.detectorRemovedAt).toBeNull();expect(b.revision).toBe(f.binding.revision);
+  });
+  it("supersedes only stale worker detector provenance with an exact post-deadline operator observation",async()=>{
+    const original=await oauthFixture(true);
+    const reported=await request(transport()).post("/api/muse/v1/detector-cleanup").set("Authorization",`Bearer ${original.tokens!.access_token}`).send({version:1,requestId:randomUUID(),bindingId:original.binding.id,generation:original.binding.generation,detectorRemoved:true});expect(reported.status).toBe(200);
+    const [workerRow]=await db.select().from(activityLog).where(and(eq(activityLog.entityId,original.agent.id),eq(activityLog.action,"muse.detector_removal_reported")));
+    const [workerBinding]=await db.select().from(bindings).where(eq(bindings.id,original.binding.id));
+    const f=await detectorCleanupFixture(original);
+    await db.update(bindings).set({qualificationExpiresAt:new Date(workerRow.createdAt.getTime()+1),qualificationStartedAt:new Date(workerRow.createdAt.getTime()+1-86_400_000)}).where(eq(bindings.id,f.binding.id));
+    const before=await f.broker.bindingForAgent(f.company.id,f.agent.id);expect(before!.cleanup.detectorEvidence).toMatchObject({source:"authenticated_worker_report",recordedAt:workerRow.createdAt.toISOString()});expect(before!.cleanup.attestationEligible).toBe(true);
+    const result=await request(f.app).post(f.path).send(f.input);expect(result.status).toBe(200);
+    const after=await f.broker.bindingForAgent(f.company.id,f.agent.id);expect(after!.cleanup.detectorEvidence).toEqual(result.body.evidence);expect(after!.cleanup.detectorEvidence?.source).toBe("operator_runtime_attestation");expect(after!.cleanup.attestationEligible).toBe(false);
+    expect(await db.select().from(activityLog).where(eq(activityLog.id,workerRow.id))).toEqual([workerRow]);
+    expect(workerBinding.detectorRemovedAt).not.toBeNull();
+    expect((await f.broker.readQualificationEvidence(f.company.id,f.agent.id,f.binding.id,f.input.qualificationId)).detectorCleanup).toEqual(result.body.evidence);
+    await expect(f.identity.authenticateOAuthAccess(f.tokens!.access_token,oauthOrigin)).rejects.toThrow();
+  });
+  it("does not clear claimed-worker or unknown-native-effect holds when recording detector removal",async()=>{
+    const activeRun=await active(await oauthFixture(true));
+    try {
+      await activeRun.broker.act(activeRun.subject,{version:1,command:"assignment.claim",assignmentId:activeRun.assignment.id,requestId:randomUUID()});
+      const f=await detectorCleanupFixture(activeRun);
+      await db.update(externalAgentHolds).set({nativeEffectsUnknown:true}).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));
+      const before=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id));expect(before).toHaveLength(1);expect(before[0]).toMatchObject({workerUnknown:true,nativeEffectsUnknown:true,releasedAt:null});
+      expect((await request(f.app).post(f.path).send(f.input)).status).toBe(200);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,activeRun.assignment.id))).toEqual(before);
+      expect((await f.broker.bindingForAgent(f.company.id,f.agent.id))!.stop).toMatchObject({status:"cannot_confirm",nativeEffectsUnknown:true});
+    }finally{await activeRun.detach();}
+  });
+  it("requires a full supported hook listing and exact absence, not disablement or arbitrary evidence",async()=>{
+    const f=await detectorCleanupFixture();
+    for(const observation of [{...f.input.observation,includeDisabled:false},{...f.input.observation,includeDisabled:undefined},{...f.input.observation,outcome:"disabled"},{...f.input.observation,method:"summary"},{...f.input.observation,hookId:"https://private.example"},{...f.input.observation,sha256:"private-canary"},{...f.input.observation,url:"https://private.example"}])expect((await request(f.app).post(f.path).send({...f.input,observation})).status).toBe(400);
+    expect((await f.broker.bindingForAgent(f.company.id,f.agent.id))!.cleanup.detectorEvidence).toBeNull();
+  });
+  it("keeps detector evidence atomic, serialized and exact-replay idempotent",async()=>{
+    const f=await detectorCleanupFixture(),spy=vi.spyOn(activityLogModule,"logActivity").mockRejectedValueOnce(new Error("synthetic audit storage failure"));
+    try{expect((await request(f.app).post(f.path).send(f.input)).status).toBe(500);}finally{spy.mockRestore();}
+    let [b]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));expect(b.revision).toBe(f.binding.revision);expect(b.detectorRemovedAt).toBeNull();expect(b.detectorRemovalRequestedAt).toBeNull();
+    const replies=await Promise.all([request(f.app).post(f.path).send(f.input),request(f.app).post(f.path).send(f.input)]);expect(replies.map(r=>r.status)).toEqual([200,200]);expect(replies[0].body).toEqual(replies[1].body);
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId,f.agent.id),eq(activityLog.action,"muse.detector_cleanup_attested")))).toHaveLength(1);
+    expect((await request(f.app).post(f.path).send({...f.input,observation:{...f.input.observation,sha256:"e".repeat(64)}})).status).toBe(409);
+    [b]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));await db.update(bindings).set({revision:b.revision+1}).where(eq(bindings.id,b.id));expect((await request(f.app).post(f.path).send(f.input)).status).toBe(409);
+  });
+  it("does not trust public activity forgery as detector evidence or a completed replay",async()=>{
+    const f=await detectorCleanupFixture();
+    const forged=await request(f.app).post(`/companies/${f.company.id}/activity`).send({actorType:"user",actorId:f.operatorId,agentId:f.agent.id,responsibleUserId:f.operatorId,action:"muse.detector_cleanup_attested",entityType:"agent",entityId:f.agent.id,details:{...f.input,source:"operator_runtime_attestation",method:"hooks.list",includeDisabled:true,hookId:f.input.observation.hookId,outcome:"exact_hook_absent",recordedAt:new Date().toISOString(),observedAt:f.input.observation.observedAt}});expect(forged.status).toBe(201);expect(forged.body.responsibleUserId).toBeNull();
+    await db.update(bindings).set({detectorRemovalRequestedAt:new Date(),detectorRemovedAt:new Date()}).where(eq(bindings.id,f.binding.id));
+    expect((await f.broker.bindingForAgent(f.company.id,f.agent.id))!.cleanup.detectorEvidence).toBeNull();
+    expect((await request(f.app).post(f.path).send(f.input)).status).toBe(200);
+    const trusted=await f.broker.bindingForAgent(f.company.id,f.agent.id);expect(trusted!.cleanup.detectorEvidence?.source).toBe("operator_runtime_attestation");
+  });
+  it("rejects premature, future, replaced and no-longer-authorized detector attestations",async()=>{
+    const f=await detectorCleanupFixture();
+    for(const observedAt of [new Date(f.binding.revokedAt!.getTime()-1).toISOString(),new Date(Date.now()+60_000).toISOString()])expect((await request(f.app).post(f.path).send({...f.input,observation:{...f.input.observation,observedAt}})).status).toBe(409);
+    await db.update(companyMemberships).set({membershipRole:"viewer"}).where(and(eq(companyMemberships.companyId,f.company.id),eq(companyMemberships.principalId,f.operatorId)));
+    expect((await request(f.app).post(f.path).send(f.input)).status).toBe(403);
+    await db.update(companyMemberships).set({membershipRole:"owner"}).where(and(eq(companyMemberships.companyId,f.company.id),eq(companyMemberships.principalId,f.operatorId)));
+    await db.insert(bindings).values({companyId:f.company.id,agentId:f.agent.id,operatorId:f.operatorId,generation:f.binding.generation+1,status:"pairing"});
+    expect((await request(f.app).post(f.path).send(f.input)).status).toBe(409);
+    expect((await f.broker.readQualificationEvidence(f.company.id,f.agent.id,f.binding.id,f.input.qualificationId)).detectorCleanup).toBeNull();
+  });
   it("consumes a ten-minute ticket once and separates credential lanes",async()=>{
     const f=await fixture(false);await expect(f.identity.pair(f.ticket,"2")).rejects.toThrow("consumed");
     expect(f.credentials).not.toHaveProperty("signalToken");

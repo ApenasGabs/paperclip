@@ -187,6 +187,8 @@ async function main() {
   const result = command === "report" ? { evidence: await readEvidence(state), connection: await status(state) } : await tick(state, command === "stop");
   const cleanupBinding = result.connection.binding?.id === state.bindingId && result.connection.binding.generation === state.generation
     ? result.connection.binding : null;
+  const cleanupEvidence = result.evidence.detectorCleanup;
+  const exactCleanupEvidence = cleanupBinding && cleanupEvidence?.bindingId === state.bindingId && cleanupEvidence.generation === state.generation && cleanupEvidence.qualificationId === state.qualificationId ? cleanupEvidence : null;
   // API evidence is retained privately. The dedicated projector prints only allowlisted facts.
   // Cadence remains unqualified until the server's complete bounded contact evidence is available.
   const report = qualificationReport({
@@ -196,7 +198,7 @@ async function main() {
       from: window.startedAt, to: window.endedAt, coverageComplete: result.evidence.cadenceEvidenceComplete,
       healthy: result.evidence.cadenceEvidenceComplete, activeAssignments: 0, unconsumedInputs: 0,
     })),
-    cleanup: { authorityRevoked: result.evidence.authorityRevoked,
+    cleanup: { authorityRevoked: result.evidence.authorityRevoked, detectorEvidenceSource: exactCleanupEvidence?.source ?? null, detectorEvidenceRecordedAt: exactCleanupEvidence?.recordedAt ?? null, detectorObservationAt: exactCleanupEvidence?.observedAt ?? null,
       detectorRemovalRequested: cleanupBinding?.cleanup?.detectorRemovalRequested === true,
       detectorRemoved: cleanupBinding?.cleanup?.detectorRemoved === true,
       workerStopUnconfirmed: !cleanupBinding || cleanupBinding.stop.status === "cannot_confirm" || cleanupBinding.stop.status === "worker_reported",
