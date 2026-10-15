@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 
 import {
@@ -586,3 +586,140 @@ test("a failed chat child fails the job after its sibling finishes", { skip: pro
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+
+const workspacesReportingEnv = {
+  GITHUB_ACTIONS: "true",
+  GITHUB_WORKFLOW: "PR",
+  PAPERCLIP_CI_PROFILE_JOB: "General tests (workspaces-b)",
+};
+
+function loadActualRootVitestReporting(overrides = {}) {
+  const env = { ...process.env };
+  for (const key of ["GITHUB_ACTIONS", "GITHUB_WORKFLOW", "PAPERCLIP_CI_PROFILE_JOB", "PAPERCLIP_CI_PROFILE"]) {
+    delete env[key];
+  }
+  Object.assign(env, overrides);
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    import { configDefaults } from "vitest/config";
+    const { default: config } = await import(${JSON.stringify(pathToFileURL(path.join(repoRoot, "vitest.config.ts")).href)});
+    process.stdout.write(JSON.stringify({ config, defaults: configDefaults.reporters }));
+  `], { cwd: repoRoot, env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  return JSON.parse(result.stdout);
+}
+
+function withoutExplicitReporters(config) {
+  const copy = structuredClone(config);
+  delete copy.test.reporters;
+  return copy;
+}
+
+test("workspaces-b reporting omits only its GitHub annotations in the actual root config", () => {
+  for (const profile of ["false", "true"]) {
+    const actual = loadActualRootVitestReporting({ ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE: profile });
+    const ordinary = loadActualRootVitestReporting({ ...workspacesReportingEnv,
+      PAPERCLIP_CI_PROFILE_JOB: "General tests (workspaces-c)", PAPERCLIP_CI_PROFILE: profile });
+    assert.ok(actual.defaults.includes("github-actions"), "the real Vitest default must contain the annotation reporter");
+    assert.ok(actual.defaults.some(reporter => reporter !== "github-actions"), "ordinary console reporting must remain available");
+    const expected = actual.defaults.filter(reporter => reporter !== "github-actions");
+    if (profile === "true") expected.push("./scripts/ci-profile/vitest-reporter.mjs");
+    assert.deepEqual(actual.config.test.reporters, expected);
+    assert.deepEqual(withoutExplicitReporters(actual.config), withoutExplicitReporters(ordinary.config),
+      "projects and all execution options must stay identical to the ordinary lane");
+  }
+});
+
+test("workspaces-b reporting preserves normal defaults outside the exact trusted PR lane", () => {
+  const otherEnvironments = [
+    {},
+    { ...workspacesReportingEnv, GITHUB_ACTIONS: "false" },
+    { ...workspacesReportingEnv, GITHUB_WORKFLOW: "Release verification" },
+    { ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE_JOB: "General tests (workspaces-a (1/2))" },
+    { GITHUB_ACTIONS: "true", GITHUB_WORKFLOW: "PR" },
+  ];
+  for (const env of otherEnvironments) {
+    for (const profile of ["false", "true"]) {
+      const actual = loadActualRootVitestReporting({ ...env, PAPERCLIP_CI_PROFILE: profile });
+      if (profile === "true") {
+        assert.deepEqual(actual.config.test.reporters,
+          [...actual.defaults, "./scripts/ci-profile/vitest-reporter.mjs"]);
+      } else {
+        assert.equal(Object.hasOwn(actual.config.test, "reporters"), false,
+          "ordinary invocations must retain Vitest's automatic reporter configuration");
+      }
+    }
+  }
+});
+
+for (const profile of ["false", "true"]) {
+  test(`workspaces-b reporting preserves exact launcher argv and failure exits (profile ${profile})`,
+    { skip: process.platform === "win32" }, () => {
+      const directory = mkdtempSync(path.join(os.tmpdir(), "workspaces-reporting-proof-"));
+      const receipt = path.join(directory, "calls.ndjson");
+      const fakePnpm = path.join(directory, "pnpm");
+      const configured = loadActualRootVitestReporting({ ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE: profile });
+      const configuredProjects = configured.config.test.projects
+        .filter(root => !["server", "ui", "cli", "packages/db"].includes(root))
+        .map(root => JSON.parse(readFileSync(path.join(repoRoot, root, "package.json"), "utf8")).name);
+      const expectedProjects = dryRunJson(["--mode", "general", "--group", "general-workspaces-b"],
+        { ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE: profile }).workspaceProjects;
+      assert.equal(expectedProjects.length, 17, "the diagnosed lane must retain its complete seventeen-project roster");
+      assert.deepEqual([...expectedProjects].sort(), [...configuredProjects].sort(),
+        "the ordered launcher plan must cover the complete actual root-config project set");
+      const env = { ...process.env, ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE: profile,
+        PAPERCLIP_CI_PROFILE_DIR: path.join(directory, "profile"),
+        PATH: `${directory}${path.delimiter}${process.env.PATH}` };
+      delete env.PAPERCLIP_CI_PROFILE_INVOCATION;
+      delete env.PAPERCLIP_REPORTER_FIXTURE_FAIL_PROJECT;
+      let observed = [];
+      const readCalls = () => readFileSync(receipt, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      const assertCall = (call, project) => {
+        assert.deepEqual(call.argv, ["exec", "vitest", "run", "--exclude", "**/dist/**", "--project", project]);
+        assert.deepEqual(call.reporting, { ...workspacesReportingEnv, PAPERCLIP_CI_PROFILE: profile });
+        assert.equal(call.profileInvocationPresent, profile === "true");
+      };
+      const removeOwnedHomes = calls => {
+        for (const call of calls) {
+          assert.equal(path.dirname(call.testRoot), realpathSync("/tmp"));
+          assert.ok(path.basename(call.testRoot).startsWith("pv-"));
+          rmSync(call.testRoot, { recursive: true, force: true });
+        }
+      };
+      try {
+        writeFileSync(fakePnpm, `#!${process.execPath}
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const argv = process.argv.slice(2);
+          fs.appendFileSync(${JSON.stringify(receipt)}, JSON.stringify({ argv,
+            reporting: { GITHUB_ACTIONS: process.env.GITHUB_ACTIONS, GITHUB_WORKFLOW: process.env.GITHUB_WORKFLOW,
+              PAPERCLIP_CI_PROFILE_JOB: process.env.PAPERCLIP_CI_PROFILE_JOB, PAPERCLIP_CI_PROFILE: process.env.PAPERCLIP_CI_PROFILE },
+            profileInvocationPresent: Boolean(process.env.PAPERCLIP_CI_PROFILE_INVOCATION),
+            testRoot: path.dirname(process.env.PAPERCLIP_HOME)
+          }) + '\\n');
+          if (argv[argv.indexOf('--project') + 1] === process.env.PAPERCLIP_REPORTER_FIXTURE_FAIL_PROJECT) process.exit(7);
+        `);
+        chmodSync(fakePnpm, 0o755);
+        const args = [script, "--mode", "general", "--group", "general-workspaces-b"];
+        const success = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", env, timeout: 30_000 });
+        observed = readCalls();
+        assert.equal(success.status, 0, success.stdout + success.stderr);
+        assert.equal(observed.length, expectedProjects.length);
+        observed.forEach((call, index) => assertCall(call, expectedProjects[index]));
+        removeOwnedHomes(observed);
+        observed = [];
+        writeFileSync(receipt, "");
+        const failureIndex = 2;
+        const failed = spawnSync(process.execPath, args, { cwd: repoRoot, encoding: "utf8", timeout: 30_000,
+          env: { ...env, PAPERCLIP_REPORTER_FIXTURE_FAIL_PROJECT: expectedProjects[failureIndex] } });
+        observed = readCalls();
+        assert.equal(failed.status, 1, failed.stdout + failed.stderr);
+        assert.match(failed.stderr, /failed \(7\)/);
+        assert.equal(observed.length, failureIndex + 1, "the ordinary fail-fast boundary must stay unchanged");
+        observed.forEach((call, index) => assertCall(call, expectedProjects[index]));
+      } finally {
+        removeOwnedHomes(observed);
+        rmSync(directory, { recursive: true, force: true });
+      }
+    });
+}
