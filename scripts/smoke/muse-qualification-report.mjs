@@ -1,5 +1,5 @@
 /** Secret-free interpretation of a bounded personal-Muse probe, not a Product E2E campaign. */
-export const MUSE_QUALIFICATION_GRADER = "paperclip.muse-qualification.v2";
+export const MUSE_QUALIFICATION_GRADER = "paperclip.muse-qualification.v3";
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const timestamp = value => typeof value === "string" ? Date.parse(value) : NaN;
@@ -45,8 +45,11 @@ export function qualificationReport(evidence, now = Date.now()) {
     && !samples.some(sample => timestamp(sample.queuedAt) < timestamp(window.to)
       && (!Number.isFinite(timestamp(sample.finalizedAt)) || timestamp(sample.finalizedAt) > timestamp(window.from))));
   const cleanup = evidence.cleanup ?? {};
-  const stopped = cleanup.authorityRevoked === true && timestamp(run.deadlineEnforcedAt) >= expiry
-    && timestamp(run.deadlineEnforcedAt) <= expiry + 60_000;
+  const authorityRevoked = cleanup.authorityRevoked === true;
+  const detectorRemovalRequested = cleanup.detectorRemovalRequested === true;
+  const detectorRemovalReported = cleanup.detectorRemoved === true;
+  const stopped = authorityRevoked && detectorRemovalRequested && detectorRemovalReported
+    && timestamp(run.deadlineEnforcedAt) >= expiry && timestamp(run.deadlineEnforcedAt) <= expiry + 60_000;
   const noUncertainty = cleanup.nativeEffectsUnknown === false && cleanup.workerStopUnconfirmed === false;
   const sourceKnown = sha(provenance.coreRevision) && sha(provenance.runnerRevision)
     && provenance.protocolVersion === 1 && provenance.profile === "muse-personal"
@@ -88,10 +91,11 @@ export function qualificationReport(evidence, now = Date.now()) {
     fullResponse: distribution(samples.map(sample => duration(sample.queuedAt, sample.finalizedAt))),
     receiverIntervals: intervalsValid ? cadence.observedIntervals : null, fractionWithinSevenSeconds: fraction,
     requestedPollIntervalMs: 5000, cadenceEvidenceComplete: cadenceComplete, sustainedIdleVerified: idleVerified,
+    authorityRevoked, detectorRemovalRequested, detectorRemovalReported,
     deadlineCleanupVerified: stopped, unresolvedRemoteWork: !noUncertainty,
     usage: null, cost: null, usageAccounting: "unavailable", workflows,
     qualificationPassed: passed, releaseQualified: passed && Object.values(workflows).every(Boolean), reasons,
-    evidenceBoundary: "Authenticated unattended round trips and native receipts; private Muse tool activity is not independently observed.",
+    evidenceBoundary: "Authenticated unattended round trips and native receipts; detector removal is authenticated worker-reported, not independently confirmed by the provider. Private Muse tool activity is not independently observed.",
   };
 }
 
