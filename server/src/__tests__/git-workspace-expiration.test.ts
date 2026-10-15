@@ -288,8 +288,27 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
 
   it("expires an isolated base whose worktree was nested inside it", async () => {
     const f = await fixture(false, true);
+    await fs.mkdir(path.join(f.baseCwd, ".git", "branches"), { recursive: true });
     expect(await f.expire()).toMatchObject({ expired: true, baseExpired: true });
     expect(await exists(f.baseCwd)).toBe(false);
+    expect(await f.reopen()).toMatchObject({ ok: true });
+    expect(git(f.cwd, "rev-parse", "HEAD")).toBe(f.commitA);
+  });
+
+  it.each(["file", "symlink"])("preserves a legacy branches directory with %s data", async kind => {
+    const f = await fixture(false, true);
+    const branches = path.join(f.baseCwd, ".git", "branches");
+    await fs.mkdir(branches, { recursive: true });
+    const note = path.join(branches, "saved-remote");
+    await fs.writeFile(note, "unique legacy remote\n");
+    if (kind === "symlink") {
+      const target = path.join(root, `legacy-branches-${randomUUID()}`);
+      await fs.rename(branches, target);
+      await fs.symlink(target, branches);
+    }
+    expect(await f.expire()).toMatchObject({ expired: true, baseExpired: false, skipReason: "custom_git_metadata" });
+    expect(await fs.readFile(note, "utf8")).toBe("unique legacy remote\n");
+    expect(await f.expire({ dryRun: true })).toMatchObject({ candidate: true, expired: false, skipReason: "custom_git_metadata" });
     expect(await f.reopen()).toMatchObject({ ok: true });
     expect(git(f.cwd, "rev-parse", "HEAD")).toBe(f.commitA);
   });

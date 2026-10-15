@@ -18,6 +18,17 @@ Native runners retain a session-owned broker and launcher path across warm turns
 
 The session broker listens only on controller loopback and accepts only its authenticated GitHub credential operation. Remote executions reach it through the existing authenticated callback bridge. Its transport and launchers are retired with the provider session. If remote bridge startup fails, anonymous launchers keep ordinary work available; the next run retries setup with a fresh session. Controller restart/cold recovery still uses the existing checkpoint and process-recovery rules; the broker's in-memory authority is not persisted for adoption.
 
+The native GitHub callback bridge uses HTTP/2 only when the server-selected
+`enableSandboxDuplexBridge` flag and the sandbox's verified duplex capability
+permit it. Missing settings, unsupported providers and failed channel startup
+keep the authenticated file bridge. Changing the server flag retires a retained
+warm bridge at the next normal run boundary, before a retained instruction copy
+is claimed. A lost HTTP/2 channel also makes the broker unavailable and retires
+that warm session at its next admission. An unchanged flag and a healthy broker
+permit reuse. Normal session cleanup closes the channel as an orderly completion.
+This selection changes transport only; operation-time credential checks remain
+the same. Local and SSH execution retain their existing transport.
+
 Other adapters continue using the run-scoped signed capability and public broker endpoint. That endpoint rejects browser origins and session cookies, validates a distinct signed runtime scope, and rechecks the company, agent, and live run. GitHub credentials are returned only to the managed command process, never persisted in identity history or injected into the long-lived provider process.
 
 Low-trust executions cannot receive raw GitHub credentials, including dedicated
@@ -50,6 +61,13 @@ project's package configuration. Sandbox command checks use
 the same sanitized environment as execution, so a CLI visible only in the
 provider's default environment cannot pass the launch check. Failed path
 discovery stops startup instead of silently falling back to a minimal path.
+
+Providers that declare concurrent sync support stage at most three independent
+launcher files at once. Other providers keep serial staging. Each file retains
+its content hash, upload lock, integrity check and atomic rename. A failed batch
+settles all started uploads before startup rejects; later files and the final
+permission step do not start. This changes startup scheduling, not credentials
+or callback transport selection.
 
 Scripts that previously read a persistent `GH_TOKEN` must use managed `git`, `gh`, or GitHub gateway tools. Managed execution skips legacy GitHub token bindings in agent, environment, project, and routine configuration before secret preflight. Configure personal or dedicated access through the GitHub connection instead. Directly invoking an unmanaged executable or retaining a token obtained during an earlier invocation is outside the managed invocation contract.
 

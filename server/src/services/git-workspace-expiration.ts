@@ -150,7 +150,7 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
         if (options.dryRun) {
           if (options.expireBase) {
             try { result.candidateBytes += await inspectBase(db, { ...workspace,
-              metadata: { ...workspace.metadata, [GIT_CACHE_RESTORATION_KEY]: recipe } }, options.signal, true); }
+              metadata: { ...workspace.metadata, [GIT_CACHE_RESTORATION_KEY]: recipe } }, options.signal, present); }
             catch (error) { result.skipReason = skipReason(error); }
           }
           return result;
