@@ -269,9 +269,10 @@ it("records exact detector observation while disabled and reads back authoritati
   await fillDetectorObservation(); expect(container.textContent).toContain(connection.binding!.cleanup.hookScript);
   expect(container.textContent).toContain("include_disabled: true");
   expect(button("Confirm detector observation").disabled).toBe(false);
+  const observedAt = new Date().toISOString();
   await act(async () => button("Confirm detector observation").click());
   await act(async () => { await vi.advanceTimersByTimeAsync(30); });
-  expect(record).toHaveBeenCalledExactlyOnceWith("company", "agent", expect.objectContaining({ bindingId: connection.binding!.id, generation: connection.binding!.generation, expectedRevision: connection.binding!.revision, qualificationId: connection.binding!.qualification!.id, hookScript: connection.binding!.cleanup.hookScript, observation: { method: "hooks.list", includeDisabled: true, hookId: "test-registered-hook", outcome: "exact_hook_absent", sha256: "d".repeat(64), observedAt: new Date().toISOString() } }));
+  expect(record).toHaveBeenCalledExactlyOnceWith("company", "agent", expect.objectContaining({ bindingId: connection.binding!.id, generation: connection.binding!.generation, expectedRevision: connection.binding!.revision, qualificationId: connection.binding!.qualification!.id, hookScript: connection.binding!.cleanup.hookScript, observation: { method: "hooks.list", includeDisabled: true, hookId: "test-registered-hook", outcome: "exact_hook_absent", sha256: "d".repeat(64), observedAt } }));
   expect(container.textContent).toContain("Detector removal: operator-attested");
   expect(container.textContent).toContain("not independent provider confirmation");
   expect(container.textContent).toContain("Native effect outcomes remain unknown");
