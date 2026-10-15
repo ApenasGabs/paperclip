@@ -222,6 +222,8 @@ describe("durable Dot Runner integration", () => {
 
   it.each(["openai_dot", "grok_bot"] as const)("requires a matching %s descriptor for a V6 authority fence", async provider => {
     const f = await fixture({ provider }), { run, assignment } = await offeredWork(f);
+    const [issue] = await db.insert(issues).values({ companyId: f.company.id, title: "Owned descriptor fence", assigneeAgentId: f.agent.id, checkoutRunId: run.id, executionRunId: run.id }).returning();
+    await db.update(heartbeatRuns).set({ nativeIssueId: issue!.id }).where(eq(heartbeatRuns.id, run.id));
     const binding = { companyId: f.company.id, agentId: f.agent.id, runId: run.id };
     const event = { sourceEventId: randomUUID(), payload: { kind: "authority_revoked" as const, binding: {
       ...f.snapshot, runId: run.id, normalizedSessionId: assignment.normalizedSessionId,
@@ -233,6 +235,58 @@ describe("durable Dot Runner integration", () => {
     await f.broker.port({ binding, provider: { kind: provider, binding: f.snapshot } }).dispatch(event);
     expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]!.status).toBe("fenced");
   });
+
+  it("admits a native Grok operation while an actual upload waits for its task lock", async () => {
+    const f = await fixture({ provider: "grok_bot" }), { run, assignment } = await offeredWork(f);
+    const [issue] = await db.insert(issues).values({ companyId: f.company.id, title: "Concurrent Grok publication", assigneeAgentId: f.agent.id,
+      checkoutRunId: run.id, executionRunId: run.id }).returning();
+    await db.update(heartbeatRuns).set({ status: "running", runtimeMode: "native", nativePhase: "running", driverKind: "grok_bot_mcp",
+      nativeIssueId: issue!.id, nativeSessionId: assignment.normalizedSessionId }).where(eq(heartbeatRuns.id, run.id));
+    await db.update(dotRunnerAssignments).set({ status: "accepted", acceptedAt: new Date() }).where(eq(dotRunnerAssignments.id, assignment.id));
+    await db.insert(nativeRunFinalizations).values({ runId: run.id, companyId: f.company.id, issueId: issue!.id, phase: "running",
+      controllerGeneration: assignment.controllerGeneration, leaseExpiresAt: new Date(Date.now() + 60_000) });
+    const files = new Map<string, Buffer>();
+    const transfers = createPublicMcpTransfers(db, f.oauth, async () => { throw new Error("Personal API dispatch forbidden"); }, {
+      provider: "local_disk", putFile: async input => {
+        if (!Buffer.isBuffer(input.body)) throw new Error("Expected bounded upload bytes");
+        files.set(input.objectKey!, input.body);
+        return { provider: "local_disk", objectKey: input.objectKey!, contentType: input.contentType, originalFilename: input.originalFilename,
+          byteSize: input.body.length, sha256: createHash("sha256").update(input.body).digest("hex") };
+      }, getObject: async (_company, key) => ({ stream: Readable.from(files.get(key)!) }),
+      headObject: async () => ({ exists: true }), deleteObject: async (_company, key) => { files.delete(key); },
+    }, { pathPrefix: "/mcp/runner/files", agentSession: { authorize: (principal, sessionId, taskId, write, database) => dotRunnerBroker(database ?? db).authorizeFileSession(principal, sessionId, taskId, write) } });
+    const body = Buffer.from("Authenticated concurrent deliverable"), uploadRequestId = randomUUID(), operationId = randomUUID();
+    const upload = await transfers.getUploadUrl(f.principal, { companyId: f.company.id, taskId: issue!.id, requestId: uploadRequestId,
+      filename: "concurrent.txt", contentType: "text/plain", byteSize: body.length, sha256: createHash("sha256").update(body).digest("hex") }, assignment.id);
+    const url = new URL(String(upload.url)), api = express(); api.use(transfers.router);
+    let uploading: Promise<request.Response> | undefined, uploaded: request.Response | undefined, uploadError: unknown;
+    try {
+      await db.transaction(async tx => {
+        await tx.select({ id: issues.id }).from(issues).where(eq(issues.id, issue!.id)).for("update");
+        const [holder] = await tx.execute(sql`select pg_backend_pid() as pid`) as unknown as Array<{ pid: number }>;
+        uploading = request(api).put(url.pathname + url.search).set("Content-Type", "text/plain").send(body).then(response => response);
+        await vi.waitFor(async () => {
+          const [state] = await db.execute(sql`select exists (
+            select 1 from pg_stat_activity where datname=current_database() and wait_event_type='Lock'
+              and query ilike '%issues%' and ${holder!.pid}=any(pg_blocking_pids(pid))
+          ) as waiting`) as unknown as Array<{ waiting: boolean }>;
+          expect(state!.waiting).toBe(true);
+        }, { timeout: 5000, interval: 20 });
+        const operationDb = Object.assign(Object.create(tx), {
+          transaction: async (effect: (database: typeof db) => Promise<unknown>) => effect(tx as unknown as typeof db),
+        }) as typeof db;
+        await expect(dotRunnerBroker(operationDb).operation(f.principal, assignment.id, operationId, "progress", { text: "Concurrent progress" }))
+          .resolves.toMatchObject({ status: "pending", assignmentId: assignment.id, requestId: operationId });
+      });
+    } finally {
+      try { uploaded = await uploading; } catch (error) { uploadError = error; }
+    }
+    expect(uploadError).toBeUndefined(); expect(uploaded?.status).toBe(200);
+    expect((await db.select().from(dotRunnerOperations).where(and(eq(dotRunnerOperations.assignmentId, assignment.id), eq(dotRunnerOperations.requestId, operationId))))).toHaveLength(1);
+    const attachments = await db.select().from(issueAttachments).where(eq(issueAttachments.issueId, issue!.id));
+    expect(attachments).toHaveLength(1); expect(attachments[0]).toMatchObject({ createdByAgentId: f.agent.id, originatingRunId: run.id, createdByUserId: null });
+    expect((await db.select().from(dotRunnerAssignments).where(eq(dotRunnerAssignments.id, assignment.id)))[0]!.status).toBe("accepted");
+  }, 30000);
 
   it.each(["openai_dot", "grok_bot"] as const)("keeps %s assignment authority after a rejected finish receipt until a completed finish", async provider => {
     const f = await fixture({ provider }), { run, assignment } = await offeredWork(f);

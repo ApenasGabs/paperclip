@@ -125,12 +125,9 @@ export function createPublicMcpTransfers(db: Db, oauth: PublicMcpOAuth, api: Api
       const [upload] = await tx.select().from(mcpAttachmentUploads).where(eq(mcpAttachmentUploads.id, row.uploadId!)).for("update");
       if (!upload || upload.companyId !== principal.grant.companyId || upload.userId !== principal.grant.userId || upload.workSessionId !== row.workSessionId || upload.grantId && upload.grantId !== row.grantId || upload.storageProvider !== storage.provider) throw unavailable();
       if (upload.sha256 !== digest || upload.byteSize !== bytes.length || req.get("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== upload.contentType) throw new McpCapabilityError("Upload bytes, size or Content-Type do not match the requested file.");
-      // Check access before storage without retaining an agent assignment
-      // lock. Publication locks grant then assignment, matching disconnect;
-      // remote storage must not block revocation. Keep person write checks.
       await taskAccess(principal, upload.taskId, principal.grant.purpose !== "agent", tx as unknown as Db, row.workSessionId ?? undefined);
       const stored = upload.attachmentId ? null : await storage.putFile({ companyId: upload.companyId, namespace: "mcp-transfers", objectKey: upload.objectKey, originalFilename: upload.originalFilename, contentType: upload.contentType, body: bytes });
-      // Recheck after receiving/storing bytes. Lock the grant against concurrent revocation.
+      await workSession(principal, row.workSessionId ?? undefined, upload.taskId, true, tx as unknown as Db);
       const [grant] = await tx.select().from(mcpOauthGrants).where(eq(mcpOauthGrants.id, row.grantId)).for("update");
       if (!grant || grant.revokedAt || row.expiresAt <= new Date()) throw unavailable();
       const current = await oauth.authorizeGrant(row.grantId, tx as unknown as Db);

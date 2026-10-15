@@ -1574,6 +1574,29 @@ describe("personal Muse control plane",()=>{
     expect((await request(transport()).post("/api/muse/v1/queries").set("Authorization","Bearer "+tokens.access_token).send({version:1,query:"identify"})).body).toMatchObject({bindingId:f.binding.id,agentId:f.agent.id});
     await expect(f.oauth.authorize(f.input)).rejects.toThrow();await expect(f.oauth.token(f.tokenInput())).rejects.toThrow();
   });
+  it("preserves the first successful worker release across maintenance and later idle evidence",async()=>{
+    const f=await active();try {
+      await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()});
+      const start=new Date(Date.now()-60000),at=(ms:number)=>new Date(start.getTime()+ms),releasedAt=at(-5000),workAt=at(-30000);
+      await db.update(assignments).set({status:"settled",acceptedResultAt:at(-10000),offeredAt:workAt,createdAt:workAt,claimedAt:workAt,nativeAcceptedAt:workAt,finalizedAt:at(-10000)}).where(eq(assignments.id,f.assignment.id));
+      await db.update(heartbeatRuns).set({status:"succeeded",startedAt:workAt,finishedAt:at(-10000)}).where(eq(heartbeatRuns.id,f.runId));
+      await db.update(externalAgentHolds).set({createdAt:workAt,releasedAt:null,workerUnknown:true,nativeEffectsUnknown:false}).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      vi.useFakeTimers({toFake:["Date"]});vi.setSystemTime(releasedAt);
+      await f.broker.reconcileTerminalAssignments(f.company.id,f.agent.id,f.binding.id);
+      const [first]=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      expect(first).toMatchObject({workerUnknown:false,nativeEffectsUnknown:false,releasedAt});
+      const qualificationId=randomUUID(),replicaId=randomUUID(),buckets=new Map<number,string[]>();
+      await db.update(bindings).set({qualificationId,qualificationStartedAt:start,qualificationExpiresAt:at(86400000)}).where(eq(bindings.id,f.binding.id));
+      for(let ms=0;ms<=50000;ms+=5000){const time=at(ms),bucket=Math.floor(time.getTime()/30000)*30000;const times=buckets.get(bucket)??[];times.push(time.toISOString());buckets.set(bucket,times);}
+      await db.insert(museReceiverContactBuckets).values([...buckets].map(([bucket,timestamps])=>({companyId:f.company.id,bindingId:f.binding.id,bindingGeneration:1,replicaId,bucketAt:new Date(bucket),firstAt:new Date(timestamps[0]),lastAt:new Date(timestamps.at(-1)!),timestamps,contacts:timestamps.length,gapsAtMostSevenSeconds:timestamps.length-1,maxGapMs:5000,incomplete:false})));
+      vi.setSystemTime(at(55000));
+      await f.broker.reconcileTerminalAssignments(f.company.id,f.agent.id,f.binding.id);
+      expect((await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.id,first.id)))[0]).toEqual(first);
+      const evidence=await f.broker.readQualificationEvidence(f.company.id,f.agent.id,f.binding.id,qualificationId);
+      expect(evidence.idleWindows).toEqual([{startedAt:start.toISOString(),endedAt:at(50000).toISOString()}]);
+    }finally{vi.useRealTimers();await f.detach();}
+  });
+
   describe("Muse OAuth code exchange diagnostics",()=>{
     const prefix="muse.oauth_code_exchange_",generic={error:"invalid_grant",error_description:"Authorization is expired, revoked, or invalid."};
     async function events(f:Awaited<ReturnType<typeof oauthFixture>>,rejectionsOnly=true) {
@@ -1618,6 +1641,31 @@ describe("personal Muse control plane",()=>{
       for(const value of [resource,claimedCompany,input.code,input.code_verifier,f.client.client_id,f.input.code_challenge,f.input.state,oauthCallback,code.id,code.codeHash,"resource-header-canary","resource-client-reason-canary"])expect(serialized).not.toContain(value);
       expect(code.consumedAt).toBeNull();expect(await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!))).toHaveLength(0);
       await expect(f.oauth.token(input)).resolves.toMatchObject({token_type:"Bearer"});
+    });
+    it.each(["operator_removed","operator_viewer","agent_removed"] as const)("normalizes expected %s code authority loss to the scoped invalid_grant error",async(kind)=>{
+      const f=await oauthFixture();
+      const user=and(eq(companyMemberships.companyId,f.company.id),eq(companyMemberships.principalType,"user"),eq(companyMemberships.principalId,f.operatorId));
+      if(kind==="operator_removed")await db.delete(companyMemberships).where(user);
+      else if(kind==="operator_viewer")await db.update(companyMemberships).set({membershipRole:"viewer"}).where(user);
+      else await db.delete(companyMemberships).where(and(eq(companyMemberships.companyId,f.company.id),eq(companyMemberships.principalType,"agent"),eq(companyMemberships.principalId,f.agent.id)));
+      const response=await request(transport()).post("/api/muse/v1/oauth/token").type("form").send(f.tokenInput());
+      expect(response.status).toBe(400);expect(response.body).toEqual(generic);
+      const rows=await events(f);expect(rows).toHaveLength(1);expect(rows[0]).toMatchObject({action:prefix+"rejected_current_authority_unavailable",responsibleUserId:f.operatorId,entityId:f.agent.id});
+      expect((await codeState(f)).consumedAt).toBeNull();expect(await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!))).toHaveLength(0);
+    });
+    it("normalizes expected refresh authority loss without consuming its credential",async()=>{
+      const f=await oauthFixture(true);
+      await db.delete(companyMemberships).where(and(eq(companyMemberships.companyId,f.company.id),eq(companyMemberships.principalType,"agent"),eq(companyMemberships.principalId,f.agent.id)));
+      const response=await request(transport()).post("/api/muse/v1/oauth/token").type("form").send({grant_type:"refresh_token",client_id:f.client.client_id,refresh_token:f.tokens!.refresh_token});
+      expect(response.status).toBe(400);expect(response.body).toEqual(generic);
+      const tokens=await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!));
+      expect(tokens).toHaveLength(2);expect(tokens.find(token=>token.kind==="refresh")?.usedAt).toBeNull();
+    });
+    it("preserves unexpected authority storage failures without inventing a protocol denial",async()=>{
+      const f=await oauthFixture(),fault=new Error("Synthetic authority storage failure");
+      const spy=vi.spyOn(museIdentityModule,"assertMuseCurrentAuthority").mockRejectedValueOnce(fault);
+      try{await expect(f.oauth.token(f.tokenInput())).rejects.toBe(fault);}finally{spy.mockRestore();}
+      expect((await codeState(f)).consumedAt).toBeNull();expect(await db.select().from(mcpOauthTokens).where(eq(mcpOauthTokens.grantId,f.binding.grantId!))).toHaveLength(0);expect(await events(f)).toHaveLength(0);
     });
     it("retains overlapping failed checks without claiming a single cause",async()=>{
       const f=await oauthFixture();await db.update(mcpOauthRequests).set({expiresAt:new Date(Date.now()-1)}).where(eq(mcpOauthRequests.grantId,f.binding.grantId!));

@@ -338,7 +338,7 @@ export function createPublicMcpOAuth(db: Db, config: PublicMcpConfig, options: {
         eq(museAgentBindings.grantId,source.grantId!),eq(museAgentBindings.generation,candidate.generation),isNull(museAgentBindings.revokedAt))).for("update");
       if(!binding){decideMuseCodeExchange(observation,["binding_unavailable"]);throw invalidGrant();}
       try { await assertMuseCurrentAuthority(tx,binding,true,true); }
-      catch(error){if(error instanceof HttpError&&error.status===403)decideMuseCodeExchange(observation,["current_authority_unavailable"]);throw error;}
+      catch(error){if(error instanceof HttpError&&error.status===403){decideMuseCodeExchange(observation,["current_authority_unavailable"]);throw invalidGrant();}throw error;}
       return operation(tx as unknown as Db,source.grantId!);
     }));
   }
@@ -369,6 +369,7 @@ export function createPublicMcpOAuth(db: Db, config: PublicMcpConfig, options: {
         try { await actorForGrant(grant,tx as unknown as Db); }
         catch(error){
           if((error instanceof McpOAuthError&&error.code==="invalid_grant")||(error instanceof HttpError&&error.status===403))decideMuseCodeExchange(observation,["current_authority_unavailable"],row);
+          if(museAgentConnection&&error instanceof HttpError&&error.status===403)throw invalidGrant();
           throw error;
         }
         decideMuseCodeExchange(observation,[],row);
