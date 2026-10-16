@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -145,6 +145,96 @@ it("uses the native request, exact question command ID and durable answer receip
     expect(await session.read!()).toMatchObject({ unconsumedInputs: 0 });
     const checkpoint = JSON.parse(await readFile(join(root, "state/runner/muse-provider-state.json"), "utf8"));
     expect(checkpoint).toMatchObject({ schema: "paperclip.runner.muse-provider-state.v1", runtimeInputs: { [requestId]: { consumed: true, inputDigest } } });
+  } finally {
+    commandSpy.mockRestore();
+    await session.close({ reason: "Test cleanup", force: true }).catch(() => {});
+    if (spawned) { try { process.kill(spawned.pid, "SIGTERM"); } catch {} }
+    await rm(root, { recursive: true, force: true });
+  }
+}, 45000);
+
+it("bounds default Muse question answer command IDs at the native queue boundary and across recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "muse-question-command-id-"));
+  await writeFile(join(root, "AGENTS.md"), "Use only first-party tools.");
+  const input = execution(root);
+  let send: ((operation: ExternalProviderOperation) => Promise<void>) | undefined;
+  let spawned: { pid: number; processGroupId: number | null; startedAt: string } | undefined;
+  let controllerPort = 0;
+  const deliveries: Array<{ sourceEventId: string; payload: Record<string, unknown> }> = [];
+  const settlements = new Map<string, unknown>();
+  const options: RunnerdMuseDriverOptions = {
+    execution: input, stateDirectory: join(root, "state"), runnerBinary: resolve("runner/target/debug/paperclip-runnerd"),
+    identity: { runnerInstanceId: randomUUID(), environmentLeaseId: randomUUID(), runId: input.binding.runId,
+      normalizedSessionId: input.session.normalizedSessionId!, turnId: "turn-" + input.binding.runId, itemId: "item-" + input.binding.runId },
+    onSpawn: process => { spawned = process; },
+    controlPlaneRegistration: async authority => { await authority.start(controllerPort); controllerPort = Number(new URL(authority.connectUrl).port);
+      return { connectUrl: authority.connectUrl, release: () => authority.stop() }; },
+    port: { dispatch: async () => {}, settle: async event => { settlements.set(String(event.payload.requestId), event.payload.outcome); },
+      inputAvailable: async event => { deliveries.push(event); }, attach: async callback => { send = callback; return async () => { send = undefined; }; } },
+  };
+  const operation = (action: ExternalProviderOperation["action"], args: Record<string, unknown>): ExternalProviderOperation => ({
+    requestId: randomUUID(), bindingId: input.provider.binding.bindingId, bindingGeneration: 1, runId: input.binding.runId,
+    normalizedSessionId: input.session.normalizedSessionId!, turnId: options.identity.turnId, assignmentRevision: 1,
+    action, input: args, digest: externalOperationDigest(action, args),
+  });
+  const questionSet = { schema: "paperclip.question_set.v1", questions: [{ id: "environment", prompt: "Which environment?", required: true,
+    answerMode: "single_select", options: [{ id: "test", label: "Test" }] }] };
+  const response = { schema: "paperclip.question_response.v1" as const, answers: { environment: { selectedOptionIds: ["test"] } } };
+  const commandSpy = vi.spyOn(controlPlane.DurablePrpControlPlane.prototype, "queueCommand");
+  let driver = new RunnerdMuseDriver(options);
+  let session = await driver.openSession({ runId: input.binding.runId, normalizedSessionId: input.session.normalizedSessionId! });
+  try {
+    await session.startTurn({ message: { role: "user", text: "Answer boundary questions." } });
+    await send!(operation("accept", {}));
+    const longId = "q".repeat(160);
+    const requestIds = ["q".repeat(147), "q".repeat(148), longId, "q".repeat(159) + "z",
+      createHash("sha256").update(longId).digest("hex")];
+    const commandIds: string[] = [];
+    for (const [index, requestId] of requestIds.entries()) {
+      await send!(operation("request_user_input", { requestId, questionSet }));
+      await vi.waitFor(() => expect(session.pendingRuntimeRequests!()).toMatchObject([{ requestId, input: questionSet }]), { timeout: 10000 });
+      if (index === 0) {
+        await expect(session.resolveRuntimeRequest!({ commandId: "x".repeat(161), requestId, turnId: options.identity.turnId,
+          resolution: { action: "submit", response } })).rejects.toThrow("Durable PRP command is invalid.");
+        expect(deliveries).toHaveLength(0);
+        expect(session.pendingRuntimeRequests!()).toMatchObject([{ requestId }]);
+      }
+      await session.resolveRuntimeRequest!({ requestId, turnId: options.identity.turnId, resolution: { action: "submit", response } });
+      const queued = commandSpy.mock.calls.filter(call => call[0] === "request.resolve"
+        && call[1]?.requestId === requestId && call[2] !== "x".repeat(161)).at(-1)!;
+      expect(queued).toBeDefined();
+      expect(queued[1]).toEqual({ requestId, response });
+      expect(queued[3]).toBe(true);
+      const commandId = queued[2]!;
+      expect(commandId.length).toBeLessThanOrEqual(160);
+      expect(commandId).toMatch(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+      if (requestId.length <= 147) expect(commandId).toBe(`muse_resolve_${requestId}`);
+      else { expect(commandId).toMatch(/^muse_resolve_\.[a-f0-9]{64}$/); expect(commandId).toHaveLength(78); }
+      commandIds.push(commandId);
+      await vi.waitFor(() => expect(deliveries).toHaveLength(index + 1), { timeout: 10000 });
+      const inputDigest = digestPaperclipSemanticContent({ requestId, turnId: options.identity.turnId, response });
+      expect(deliveries[index]!.payload).toMatchObject({ requestId, turnId: options.identity.turnId, response, inputDigest });
+      expect(session.pendingRuntimeRequests!()).toEqual([]);
+      const snapshot = await session.snapshot();
+      await session.detachControllerForRestart!();
+      driver = new RunnerdMuseDriver({ ...options, adoptExistingRunner: { ...spawned!, isAlive: () => true } });
+      const recovered = await driver.recoverSession(snapshot, { signal: new AbortController().signal });
+      expect(recovered.recovered).toBe(true);
+      session = recovered.session!;
+      await session.resolveRuntimeRequest!({ requestId, turnId: options.identity.turnId, resolution: { action: "submit", response } });
+      const replayed = commandSpy.mock.calls.filter(call => call[0] === "request.resolve"
+        && call[1]?.requestId === requestId && call[2] !== "x".repeat(161)).at(-1)!;
+      expect(replayed).toEqual(["request.resolve", { requestId, response }, commandId, true]);
+      expect(await session.read!()).toMatchObject({ unconsumedInputs: 1 });
+      expect(deliveries).toHaveLength(index + 1);
+      const consume = operation("consume_input", { requestId, inputDigest });
+      await send!(consume);
+      await vi.waitFor(() => expect(settlements.get(consume.requestId)).toMatchObject({ status: "consumed", requestId, inputDigest }), { timeout: 10000 });
+      expect(await session.read!()).toMatchObject({ unconsumedInputs: 0 });
+      const checkpoint = JSON.parse(await readFile(join(root, "state/runner/muse-provider-state.json"), "utf8"));
+      expect(checkpoint.runtimeInputs[requestId]).toMatchObject({ consumed: true, inputDigest });
+    }
+    expect(new Set(commandIds).size).toBe(requestIds.length);
   } finally {
     commandSpy.mockRestore();
     await session.close({ reason: "Test cleanup", force: true }).catch(() => {});
