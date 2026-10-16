@@ -46,7 +46,7 @@ async function history(sql: ReturnType<typeof postgres>) {
 async function shape(sql: ReturnType<typeof postgres>) {
   return {
     columns: Array.from(await sql`SELECT table_name, column_name, data_type, udt_name, is_nullable, column_default
-      FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, ordinal_position`),
+      FROM information_schema.columns WHERE table_schema = 'public' ORDER BY table_name, column_name`),
     constraints: Array.from(await sql`SELECT t.relname, c.conname, c.convalidated, pg_get_constraintdef(c.oid, true) AS definition
       FROM pg_constraint c JOIN pg_class t ON t.oid = c.conrelid JOIN pg_namespace n ON n.oid = t.relnamespace
       WHERE n.nspname = 'public' ORDER BY t.relname, c.conname`),
