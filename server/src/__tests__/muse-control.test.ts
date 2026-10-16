@@ -236,6 +236,135 @@ describe("personal Muse control plane",()=>{
       expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);expect(assertBridgeAuthority).not.toHaveBeenCalled();
     }finally{await f.detach();}
   });
+  it.each(["prepare","commit","replay"] as const)("rejects contended Muse reassignment targets without an idle-comment deadlock (%s)",async phase=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},native:Promise<{result?:unknown;error?:unknown}>|undefined,idle:Promise<{result?:Record<string,unknown>;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const [target]=await db.insert(issues).values({companyId:f.company.id,title:"Reassignment target",status:phase==="commit"?"in_progress":"todo",assigneeAgentId:f.agent.id,responsibleUserId:f.operatorId}).returning();
+      const oldRun=phase==="commit"?randomUUID():null;
+      if(oldRun){
+        await db.insert(heartbeatRuns).values({id:oldRun,companyId:f.company.id,agentId:f.agent.id,nativeIssueId:target.id,status:"running",runtimeMode:"native",invocationSource:"assignment",triggerDetail:"system"});
+        await db.update(issues).set({executionRunId:oldRun,checkoutRunId:oldRun}).where(eq(issues.id,target.id));
+      }
+      const stopTaskForReassignment=vi.fn(async()=>{
+        // Existing stop callback boundary: persist a cancellation acknowledgment
+        // outside row locks, so the production compensation path is exercised.
+        if(oldRun)await db.update(heartbeatRuns).set({status:"cancelled",errorCode:"issue_reassigned"}).where(eq(heartbeatRuns.id,oldRun));
+      });
+      const enqueueWakeup=vi.fn(async()=>({id:randomUUID()}));
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      let armed=false,txChecks=0,nativePid=0,idlePid=0,ready=()=>{};
+      const entered=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,stopTaskForReassignment,enqueueWakeup,
+        assertBridgeAuthority:async(database=db)=>{
+          await f.broker.assertRunAuthority(execution,database);
+          if(database!==db&&armed&&++txChecks===(phase==="prepare"?1:2)){
+            nativePid=(await database.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+            ready();await gate;
+          }
+        }});
+      const call={tool:"reassign_task",callId:randomUUID(),arguments:{taskId:target.id,assigneeActorId:null,assigneeUserId:f.operatorId,expectedAssigneeActorId:f.agent.id,expectedStatusVersion:0,reason:"Retain target context while handing work to its operator",idempotencyKey:randomUUID()}};
+      let priorReceipt:unknown;
+      if(phase==="replay"){
+        priorReceipt=await authority.execute(call);
+        expect(await authority.execute({...call,callId:randomUUID()})).toEqual(priorReceipt);
+        expect((await db.select().from(issues).where(eq(issues.id,target.id)))[0]).toMatchObject({assigneeAgentId:null,assigneeUserId:f.operatorId,statusVersion:1});
+      }
+      const readTarget=async()=>{
+        const [row]=await db.select({assigneeAgentId:issues.assigneeAgentId,assigneeUserId:issues.assigneeUserId,status:issues.status,statusVersion:issues.statusVersion,executionRunId:issues.executionRunId,checkoutRunId:issues.checkoutRunId}).from(issues).where(eq(issues.id,target.id));return row;
+      };
+      const readReassignments=()=>db.select().from(activityLog).where(and(eq(activityLog.companyId,f.company.id),eq(activityLog.entityId,target.id),eq(activityLog.action,"issue.reassigned")));
+      const beforeTarget=await readTarget(),beforeReassignments=await readReassignments();
+      const beforeRun=(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)))[0];
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      const beforeAssignment=(await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0];
+      const beforeStops=stopTaskForReassignment.mock.calls.length,beforeWakes=enqueueWakeup.mock.calls.length;
+      const command={version:1 as const,command:"task.comment" as const,requestId:randomUUID(),issueId:target.id,body:"Concurrent idle coordination"};
+      armed=true;native=authority.execute({...call,callId:randomUUID()}).then(result=>({result}),error=>({error}));
+      await expect.poll(()=>nativePid,{timeout:5000,interval:25}).toBeGreaterThan(0);
+      await entered;
+      const admissionKey=`paperclip:external-admission:${f.company.id}:${f.agent.id}`;
+      const nativeAdmission=await db.execute<{pid:number}>(sql`select pid from pg_locks where pid=${nativePid} and locktype='advisory' and granted and objsubid=1
+        and classid=((hashtextextended(${admissionKey},0)>>32)&4294967295)::oid and objid=(hashtextextended(${admissionKey},0)&4294967295)::oid`);
+      expect(nativeAdmission).toHaveLength(1);
+      idle=f.broker.act(f.subject,command).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [waiter]=await db.execute<{pid:number}>(sql`select waiting.pid from pg_locks waiting
+          inner join pg_locks held on held.pid=${nativePid} and held.locktype='advisory' and held.granted
+            and held.classid=waiting.classid and held.objid=waiting.objid and held.objsubid=waiting.objsubid
+          where waiting.locktype='advisory' and not waiting.granted and ${nativePid}=any(pg_blocking_pids(waiting.pid))
+            and waiting.objsubid=1 and waiting.classid=((hashtextextended(${admissionKey},0)>>32)&4294967295)::oid
+            and waiting.objid=(hashtextextended(${admissionKey},0)&4294967295)::oid`);
+        idlePid=waiter?.pid??0;return idlePid;
+      },{timeout:5000,interval:25}).toBeGreaterThan(0);
+      // The real idle path acquired target before requesting this admission key.
+      // Releasing the native callback now permits the original B <-> admission cycle.
+      release();
+      const [nativeOutcome,idleOutcome]=await Promise.all([native,idle]);
+      const observed=JSON.stringify({phase,nativePid,idlePid,nativeCode:(nativeOutcome.error as {cause?:{code?:string};code?:string}|undefined)?.cause?.code??(nativeOutcome.error as {code?:string}|undefined)?.code,idleCode:(idleOutcome.error as {cause?:{code?:string};code?:string}|undefined)?.cause?.code??(idleOutcome.error as {code?:string}|undefined)?.code});
+      expect(nativeOutcome.error,observed).toMatchObject({status:409,message:"paperclip_runner_reassignment_conflict: target is busy; retry after current work settles"});
+      expect(idleOutcome.error,observed).toBeUndefined();expect(idleOutcome.result).toMatchObject({status:"commented",issueId:target.id});
+      expect(await readTarget()).toEqual(beforeTarget);expect(await readReassignments()).toEqual(beforeReassignments);
+      const [afterRun]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId));
+      expect(afterRun.resultJson).toEqual(beforeRun.resultJson);expect(afterRun.status).toBe(beforeRun.status);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual(beforeAssignment);
+      expect(stopTaskForReassignment).toHaveBeenCalledTimes(beforeStops+(phase==="commit"?1:0));
+      expect(enqueueWakeup).toHaveBeenCalledTimes(beforeWakes+(phase==="commit"?1:0));
+      if(oldRun){
+        expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,oldRun)))[0]).toMatchObject({status:"cancelled",errorCode:"issue_reassigned"});
+        expect(enqueueWakeup).toHaveBeenLastCalledWith(f.agent.id,expect.objectContaining({payload:{issueId:target.id,mutation:"reassign_task_rollback",interruptedRunId:oldRun},issueStateGuard:{statuses:["todo","in_progress"],assigneeAgentId:f.agent.id,statusVersion:0}}));
+      }
+      const idleReceipts=await db.select().from(museIdleReceipts).where(and(eq(museIdleReceipts.bindingId,f.binding.id),eq(museIdleReceipts.bindingGeneration,f.binding.generation),eq(museIdleReceipts.requestId,command.requestId)));
+      expect(idleReceipts).toHaveLength(1);expect(idleReceipts[0].outcome).toEqual(idleOutcome.result);
+      expect(await db.select().from(issueComments).where(and(eq(issueComments.issueId,target.id),eq(issueComments.body,command.body)))).toHaveLength(1);
+      armed=false;
+      const result=await authority.execute({...call,callId:randomUUID()});
+      if(phase==="replay")expect(result).toEqual(priorReceipt);
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(result);
+      expect(await f.broker.act(f.subject,command)).toEqual(idleOutcome.result);
+      expect(await readTarget()).toMatchObject({assigneeAgentId:null,assigneeUserId:f.operatorId,status:"todo",statusVersion:1,executionRunId:null,checkoutRunId:null});
+      expect(await readReassignments()).toHaveLength(1);
+      expect(await db.select().from(issueComments).where(eq(issueComments.issueId,target.id))).toHaveLength(2);
+      const [settledRun]=await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId));
+      expect((settledRun.resultJson as {semanticToolReceipts:Record<string,unknown>}).semanticToolReceipts[call.arguments.idempotencyKey]).toMatchObject({operationId:"reassign_task",input:call.arguments,result});
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual(beforeAssignment);
+    }finally{release();await Promise.allSettled([native,idle]);await f.detach();}
+  });
+  it("preserves ordinary native reassignment waiting on a held target",async()=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,native:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      await db.update(heartbeatRuns).set({driverKind:"codex_app_server"}).where(eq(heartbeatRuns.id,f.runId));
+      const [target]=await db.insert(issues).values({companyId:f.company.id,title:"Ordinary reassignment target",status:"todo",assigneeAgentId:f.agent.id,responsibleUserId:f.operatorId}).returning();
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:issues.id}).from(issues).where(and(eq(issues.id,target.id),eq(issues.companyId,f.company.id))).for("update");ready();await gate;
+      });
+      await locked;
+      const assertBridgeAuthority=vi.fn(async()=>{throw new Error("Muse authority must not guard ordinary reassignment");});
+      const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,assertBridgeAuthority,stopTaskForReassignment:vi.fn(async()=>{})});
+      const call={tool:"reassign_task",callId:randomUUID(),arguments:{taskId:target.id,assigneeActorId:null,assigneeUserId:f.operatorId,expectedAssigneeActorId:f.agent.id,expectedStatusVersion:0,reason:"Ordinary handoff",idempotencyKey:randomUUID()}};
+      native=authority.execute(call).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_locks waiting
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+          where waiting.locktype='transactionid' and not waiting.granted and ${holderPid}=any(pg_blocking_pids(waiting.pid))) as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      release();await holder;
+      const result=await native;expect(result.error).toBeUndefined();expect(result.result).toMatchObject({disposition:"applied",stateRevision:1});
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(result.result);
+      expect((await db.select().from(issues).where(eq(issues.id,target.id)))[0]).toMatchObject({assigneeAgentId:null,assigneeUserId:f.operatorId,statusVersion:1});
+      expect(assertBridgeAuthority).not.toHaveBeenCalled();
+    }finally{release();await Promise.allSettled([holder,native]);await f.detach();}
+  });
   it("serializes native and idle child creation without a privacy-tree deadlock",async()=>{
     const f=await active(await oauthFixture(true));
     await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
