@@ -1503,7 +1503,16 @@ export class PaperclipRunnerToolAuthority {
       return record(prior.details?.receipt);
     };
     const authorize = async (tx: Db, run: typeof heartbeatRuns.$inferSelect) => {
-      const [target] = await tx.select().from(issues).where(and(eq(issues.id, taskId), eq(issues.companyId, this.binding.companyId))).for("update");
+      // Muse idle comments lock this target before admission. Never wait for
+      // their target while holding the caller's admission lock.
+      const [target] = await tx.select().from(issues).where(and(
+        eq(issues.id, taskId), eq(issues.companyId, this.binding.companyId),
+      )).for("update", this.binding.museRuntime ? { noWait: true } : undefined).catch((error: unknown) => {
+        if (this.binding.museRuntime && (record(error).code === "55P03" || record(record(error).cause).code === "55P03")) {
+          throw new HttpError(409, "paperclip_runner_reassignment_conflict: target is busy; retry after current work settles");
+        }
+        throw error;
+      });
       if (!target) throw new Error("paperclip_runner_task_not_found");
       const actor = this.#privacyActor(run);
       for (const action of ["issue:read", "tasks:assign"] as const) {
