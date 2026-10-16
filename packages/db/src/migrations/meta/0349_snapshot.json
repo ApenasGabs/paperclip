@@ -1,6 +1,6 @@
 {
-  "id": "85333ce5-9fbe-4f14-926b-483e96acd1bf",
-  "prevId": "6ba7bc71-6866-4a80-b96b-412bf3e1bc86",
+  "id": "cbf5e62c-5703-41fb-ac18-2df56eefc951",
+  "prevId": "72f92f9d-5e5f-4127-ae11-b995dda16188",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -47161,11 +47161,11 @@
       "checkConstraints": {
         "resource_lifecycle_events_resource_type_check": {
           "name": "resource_lifecycle_events_resource_type_check",
-          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project')"
+          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project', 'agent_runtime')"
         },
         "resource_lifecycle_events_action_check": {
           "name": "resource_lifecycle_events_action_check",
-          "value": "\"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
+          "value": "(\"resource_lifecycle_events\".\"resource_type\" = 'agent_runtime' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'delete')) OR \"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
         }
       },
       "isRLSEnabled": false
@@ -60932,38 +60932,14 @@
           "primaryKey": false,
           "notNull": false
         },
-        "qualification_started_at": {
-          "name": "qualification_started_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "qualification_expires_at": {
           "name": "qualification_expires_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
         },
-        "deadline_enforced_at": {
-          "name": "deadline_enforced_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cadence_evidence_incomplete_at": {
-          "name": "cadence_evidence_incomplete_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "cleanup_expires_at": {
           "name": "cleanup_expires_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "detector_removal_requested_at": {
-          "name": "detector_removal_requested_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
@@ -61522,19 +61498,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "signal_attempt": {
-          "name": "signal_attempt",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "signal_notified_at": {
-          "name": "signal_notified_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "source_event_id": {
           "name": "source_event_id",
           "type": "text",
@@ -61710,20 +61673,6 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true
-        },
-        "timestamps": {
-          "name": "timestamps",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "incomplete": {
-          "name": "incomplete",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
         },
         "contacts": {
           "name": "contacts",
