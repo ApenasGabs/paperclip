@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { HarnessRuntimeRequest, HarnessRuntimeRequestHandoff, HarnessRuntimeRequestResolution, HarnessDriver, HarnessDriverDescriptor, HarnessSession, OpenHarnessSessionInput, PersistedHarnessSession } from "../../contracts/harness-driver.js";
 import type { NativeExecutionInputV6, NativeExecutionInputV8 } from "../../contracts/native-execution.js";
@@ -316,10 +316,12 @@ class RunnerdExternalSession implements HarnessSession {
         || input.resolution.action !== "submit" || !("response" in input.resolution)) {
       throw new Error("external_runtime_request_resolution_invalid");
     }
+    const defaultCommandId = `${this.codec.commandPrefix}_resolve_${input.requestId}`;
+    const commandId = input.commandId ?? (defaultCommandId.length <= 160 ? defaultCommandId
+      : `${this.codec.commandPrefix}_resolve_.${createHash("sha256").update(input.requestId).digest("hex")}`);
     this.#resolvingRequests.add(input.requestId);
     try {
-      await this.#command("request.resolve", { requestId: input.requestId, response: input.resolution.response },
-        input.commandId ?? `${this.codec.commandPrefix}_resolve_${input.requestId}`);
+      await this.#command("request.resolve", { requestId: input.requestId, response: input.resolution.response }, commandId);
     } catch (error) {
       // A rejected answer did not settle the request. Unknown deliveries retain
       // the resolving barrier until their exact command receipt is reconciled.
