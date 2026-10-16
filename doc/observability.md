@@ -242,6 +242,14 @@ preparation, execution and settlement spans. They are controller work, not model
 turn time, and carry only the existing run hash. Nested phases overlap their
 containing backend or lifecycle intervals; do not add both durations.
 
+Before provider dispatch, `execution.usage_startup` measures durable usage-recorder
+initialization. `execution.mcp_handoff` measures native MCP server resolution or
+legacy managed MCP configuration. `execution.dispatch_admission` measures the
+final admission gate, including its nested `execution.budget_reservation` span.
+The admission span ends after the provider promise is handed off, not after the
+provider turn finishes. These spans use only the existing run hash. They close
+gaps between preparation and execution; their nested intervals are not additive.
+
 All preparation timing uses the endpoint gate, even when another library has
 registered a tracer provider. Tracer lookup, callback, status or ending failures
 cannot repeat work or replace its result or error. Automatic database children
