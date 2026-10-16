@@ -1249,6 +1249,86 @@ describe("personal Muse control plane",()=>{
       await expect(f.identity.authenticate(f.credentials.accessToken)).rejects.toThrow();
     }finally{await instanceSettingsService(db).updateExperimental({enableMuse:true});await f.detach();}
   });
+  it.each([false,true].flatMap(removed=>["access_expired","grant_revoked","refresh_expired","qualification_expired","unchanged"].map(fault=>({removed,fault}))))("rechecks OAuth detector evidence after the exact binding wait ($fault; removed: $removed)",async({removed,fault})=>{
+      const f=await oauthFixture(true),app=transport(),beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.agentId,f.agent.id));
+      const events:Record<string,unknown>[]=[];const unsubscribe=subscribeCompanyLiveEvents(f.company.id,event=>{if(event.type==="activity.logged")events.push(event.payload);});
+      let enter=()=>{},release=()=>{},ready=()=>{},holderPid=0,holder:Promise<void>|undefined,response:Promise<{result?:{status:number;body:Record<string,unknown>};error?:unknown}>|undefined;
+      const entry=new Promise<void>(resolve=>{enter=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;}),locked=new Promise<void>(resolve=>{ready=resolve;});
+      // OAuth authentication updates workerActivityAt first. Pause only after it
+      // reaches the actual cleanup method, then observe that method's row wait.
+      const original=f.broker.detectorCleanup.bind(f.broker),observer=vi.spyOn(f.broker,"detectorCleanup").mockImplementation(async(subject,wasRemoved)=>{await entry;return original(subject,wasRemoved);});
+      try{
+        const body={version:1,bindingId:f.binding.id,generation:f.binding.generation,requestId:randomUUID(),...(removed?{detectorRemoved:true}:{detectorRemovalRequested:true})};
+        response=request(app).post("/api/muse/v1/detector-cleanup").set("Authorization","Bearer "+f.tokens!.access_token).send(body).then(result=>({result}),error=>({error}));
+        await expect.poll(()=>observer.mock.calls.length,{timeout:5000,interval:25}).toBe(1);
+        expect(observer.mock.calls[0][0]).toMatchObject({credentialSource:"oauth",credentialId:f.subject.credentialId,grantId:f.subject.grantId,bindingId:f.binding.id,generation:f.binding.generation});
+        holder=db.transaction(async tx=>{
+          holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+          await tx.select({id:bindings.id}).from(bindings).where(eq(bindings.id,f.binding.id)).for("update");ready();await gate;
+          if(fault==="access_expired")await tx.update(mcpOauthTokens).set({expiresAt:new Date(Date.now()-1)}).where(eq(mcpOauthTokens.id,f.subject.credentialId));
+          if(fault==="grant_revoked")await tx.update(mcpOauthGrants).set({revokedAt:new Date()}).where(eq(mcpOauthGrants.id,f.subject.grantId!));
+          if(fault==="refresh_expired")await tx.update(mcpOauthTokens).set({expiresAt:new Date(Date.now()-1)}).where(and(eq(mcpOauthTokens.grantId,f.subject.grantId!),eq(mcpOauthTokens.kind,"refresh")));
+          if(fault==="qualification_expired")await tx.update(bindings).set({qualificationId:randomUUID(),qualificationStartedAt:new Date(Date.now()-60000),qualificationExpiresAt:new Date(Date.now()-1)}).where(eq(bindings.id,f.binding.id));
+        });
+        await locked;enter();
+        await expect.poll(async()=>{
+          const [row]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+            inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+            inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+            where waiter.datname=current_database() and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+              and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+                and tuple_lock.relation='muse_agent_bindings'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)) as waiting`);
+          return row.waiting;
+        },{timeout:5000,interval:25}).toBe(true);
+        release();await holder;const outcome=await response;expect(outcome.error).toBeUndefined();
+        const [binding]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));
+        const audits=await db.select().from(activityLog).where(and(eq(activityLog.companyId,f.company.id),sql`${activityLog.action} like 'muse.detector_removal_%'`));
+        if(fault==="unchanged"){
+          expect(outcome.result!.status).toBe(200);expect(outcome.result!.body).toMatchObject({status:removed?"detector_removed":"detector_removal_requested",externalStopConfirmed:false});
+          expect(removed?binding.detectorRemovedAt:binding.detectorRemovalRequestedAt).toBeInstanceOf(Date);
+          expect(audits).toHaveLength(1);expect(audits[0]).toMatchObject({actorType:"agent",actorId:f.agent.id,agentId:f.agent.id,responsibleUserId:f.operatorId,details:{bindingId:f.binding.id,generation:f.binding.generation,authorizingUserId:f.operatorId,externalStopConfirmed:false}});
+          const replay=await request(app).post("/api/muse/v1/detector-cleanup").set("Authorization","Bearer "+f.tokens!.access_token).send(body);expect(replay.status).toBe(200);
+          expect(await db.select().from(activityLog).where(and(eq(activityLog.companyId,f.company.id),sql`${activityLog.action} like 'muse.detector_removal_%'`))).toEqual(audits);
+          expect(events.filter(event=>event.action===audits[0].action)).toHaveLength(1);
+        }else{
+          expect(outcome.result!.status).toBe(401);expect(binding.detectorRemovalRequestedAt).toBeNull();expect(binding.detectorRemovedAt).toBeNull();
+          expect(audits).toEqual([]);expect(events.filter(event=>String(event.action).startsWith("muse.detector_removal_"))).toEqual([]);
+        }
+        expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.agentId,f.agent.id))).toEqual(beforeHolds);
+      }finally{enter();release();await Promise.allSettled([holder,response]);observer.mockRestore();unsubscribe();}
+  });
+  it.each(["credential_expired","window_expired","unchanged"] as const)("retains bounded legacy detector authority after a real binding wait (%s)",async fault=>{
+    const f=await fixture(),state=(await f.broker.bindingForAgent(f.company.id,f.agent.id))!;
+    await f.broker.revoke(f.company.id,f.agent.id,f.operatorId,{bindingId:f.binding.id,generation:f.binding.generation,expectedRevision:state.revision});
+    let release=()=>{},ready=()=>{},holderPid=0,holder:Promise<void>|undefined,response:Promise<{status:number;body:Record<string,unknown>}>|undefined;
+    const gate=new Promise<void>(resolve=>{release=resolve;}),locked=new Promise<void>(resolve=>{ready=resolve;});
+    try{
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:bindings.id}).from(bindings).where(eq(bindings.id,f.binding.id)).for("update");ready();await gate;
+        if(fault==="credential_expired")await tx.update(museCredentials).set({expiresAt:new Date(Date.now()-1)}).where(and(eq(museCredentials.bindingId,f.binding.id),eq(museCredentials.kind,"detector_cleanup")));
+        if(fault==="window_expired")await tx.update(bindings).set({cleanupExpiresAt:new Date(Date.now()-1)}).where(eq(bindings.id,f.binding.id));
+      });
+      await locked;
+      response=request(transport(true)).post("/api/muse/v1/detector-cleanup").set("Authorization","Bearer "+f.credentials.detectorCleanupToken).send({version:1,bindingId:f.binding.id,generation:f.binding.generation,requestId:randomUUID(),detectorRemoved:true}).then(result=>result);
+      await expect.poll(async()=>{
+        const [row]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+          inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+          where waiter.datname=current_database() and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+              and tuple_lock.relation='muse_agent_bindings'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)) as waiting`);
+        return row.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      release();await holder;const result=await response;
+      const [binding]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));
+      const audits=await db.select().from(activityLog).where(and(eq(activityLog.companyId,f.company.id),eq(activityLog.action,"muse.detector_removal_reported")));
+      if(fault==="unchanged"){expect(result.status).toBe(200);expect(binding.detectorRemovedAt).toBeInstanceOf(Date);expect(audits).toHaveLength(1);}
+      else{expect(result.status).toBe(403);expect(binding.detectorRemovedAt).toBeNull();expect(audits).toEqual([]);}
+      expect(binding.revokedAt).toBeInstanceOf(Date);expect(binding.detectorRemovalRequestedAt).toBeNull();expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.agentId,f.agent.id))).toEqual([]);
+    }finally{release();await Promise.allSettled([holder,response]);}
+  });
+
   it("audits detector cleanup once per observation and preserves exact agent attribution",async()=>{
     const f=await fixture();
     const state=(await f.broker.bindingForAgent(f.company.id,f.agent.id))!;

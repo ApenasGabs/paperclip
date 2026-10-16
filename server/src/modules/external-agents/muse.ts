@@ -466,6 +466,16 @@ function createMuseBroker(db:Db, publicOrigin?:string) {
       await db.transaction(async tx => {
         const [b] = await tx.select().from(bindings).where(and(eq(bindings.id,s.bindingId),eq(bindings.generation,s.generation),eq(bindings.companyId,s.companyId),eq(bindings.agentId,s.agentId))).for("update");
         if (!b) throw forbidden("Cleanup binding changed.");
+        if (s.credentialSource === "oauth") {
+          await assertMuseCleanupCredential(tx,s,connectionResource());
+        } else {
+          const now=new Date();
+          const [credential]=await tx.select({id:credentials.id}).from(credentials).where(and(
+            eq(credentials.id,s.credentialId),eq(credentials.companyId,s.companyId),eq(credentials.bindingId,b.id),
+            eq(credentials.bindingGeneration,b.generation),eq(credentials.kind,"detector_cleanup"),
+            isNull(credentials.revokedAt),isNull(credentials.consumedAt),gt(credentials.expiresAt,now)));
+          if(s.provider!=="muse"||b.operatorId!==s.authorizingUserId||!credential||!b.revokedAt||!b.cleanupExpiresAt||b.cleanupExpiresAt<=now)throw forbidden("Cleanup authority expired.");
+        }
         if (removed ? !b.detectorRemovedAt : !b.detectorRemovalRequestedAt) {
           await tx.update(bindings).set({...(removed?{detectorRemovedAt:new Date()}:{detectorRemovalRequestedAt:new Date()}),updatedAt:new Date()}).where(eq(bindings.id,b.id));
           await logActivity(tx as unknown as Db,{companyId:b.companyId,actorType:"agent",actorId:b.agentId,agentId:b.agentId,responsibleUserIdOverride:b.operatorId,action:removed?"muse.detector_removal_reported":"muse.detector_removal_requested",entityType:"agent",entityId:b.agentId,details:{bindingId:b.id,generation:b.generation,authorizingUserId:b.operatorId,externalStopConfirmed:false}},publications);
