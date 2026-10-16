@@ -23,9 +23,9 @@ const STORES = {
 type Provider=keyof typeof STORES;
 type Database=Db|ExternalAdmissionTransaction;
 interface Binding extends Record<string,unknown> {id:string;companyId:string;agentId:string;generation:number;operatorId:string;status:string;revokedAt:Date|null;grantId:string|null;providerKind:"openai_dot"|"grok_bot"|null}
-interface Assignment extends Record<string,unknown> {id:string;companyId:string;agentId:string;bindingId:string;bindingGeneration:number;runId:string;normalizedSessionId:string;turnId:string;revision:number;controllerGeneration:number;status:string;acceptBy:Date;expiresAt:Date;createdAt:Date;claimedAt:Date|null;projection:Record<string,unknown>}
+interface Assignment extends Record<string,unknown> {id:string;companyId:string;agentId:string;bindingId:string;bindingGeneration:number;runId:string;normalizedSessionId:string;turnId:string;revision:number;controllerGeneration:number;status:string;acceptBy:Date|string;expiresAt:Date|string;createdAt:Date|string;claimedAt:Date|string|null;projection:Record<string,unknown>}
 interface Receipt extends Record<string,unknown> {id:string;companyId:string;assignmentId:string;requestId:string;digest:string;command:Record<string,unknown>;status:string;outcome:Record<string,unknown>|null;continuationReceiptId:string|null}
-interface Authority {binding:{id:string;companyId:string;agentId:string;generation:number};assignment:Pick<Assignment,"id"|"companyId"|"agentId"|"bindingId"|"bindingGeneration"|"runId"|"normalizedSessionId"|"turnId"|"revision"|"controllerGeneration"|"status"|"expiresAt"|"createdAt"> & {claimedAt?:Date|null}}
+interface Authority {binding:{id:string;companyId:string;agentId:string;generation:number};assignment:Pick<Assignment,"id"|"companyId"|"agentId"|"bindingId"|"bindingGeneration"|"runId"|"normalizedSessionId"|"turnId"|"revision"|"controllerGeneration"|"status"> & {expiresAt:Date;createdAt:Date;claimedAt?:Date|null}}
 interface Identity<S> {
   authorize(subject:S,assignmentId:string,settled?:boolean):Promise<Authority>;
   enabled(provider?:"openai_dot"|"grok_bot"):Promise<boolean>;
@@ -35,6 +35,10 @@ interface Identity<S> {
 type Execution={binding:{companyId:string;agentId:string;runId:string};provider:{kind?:"openai_dot"|"grok_bot"|"muse";binding:DotBindingSnapshot}};
 const bindingSchema=z.object({bindingId:z.uuid(),bindingGeneration:z.number().int().positive(),companyId:z.uuid(),agentId:z.uuid(),runId:z.uuid(),normalizedSessionId:z.string().min(1),turnId:z.string().min(1),assignmentRevision:z.number().int().positive()});
 const commandSchema=z.object({requestId:z.uuid(),bindingId:z.uuid(),bindingGeneration:z.number().int().positive(),runId:z.uuid(),normalizedSessionId:z.string().min(1),turnId:z.string().min(1),assignmentRevision:z.number().int().positive(),digest:z.string(),action:z.enum(["accept","tool","progress","finish","renew","request_user_input","consume_input"]),input:z.record(z.string(),z.unknown())}).strict();
+function isFutureAssignmentTime(value:unknown):boolean {
+  const deadline=value instanceof Date?value.getTime():typeof value==="string"?Date.parse(value):NaN;
+  return Number.isFinite(deadline)&&deadline>Date.now();
+}
 /** Private shared broker. Its callers supply an identity adapter once, then
  * invoke whole domain operations; they cannot assemble lifecycle primitives. */
 export function createNativeExternalBroker<S>(db:Db,provider:Provider,identity:Identity<S>) {
@@ -93,7 +97,7 @@ export function createNativeExternalBroker<S>(db:Db,provider:Provider,identity:I
     const send=await db.transaction(tx=>withExecutionAdmission(tx,a.companyId,a.agentId,a.runId,async()=>{
       const b=await currentBinding(tx,a.bindingId,a.bindingGeneration);await assertCurrentAuthority(tx,b);
       const [current]=await tx.execute<Assignment>(sql`select ${assignmentColumns} from ${assignmentTable} where id=${a.id}::uuid for update`);
-      if(!current||current.status==="fenced"||current.status==="settled"||current.expiresAt<=new Date()||current.controllerGeneration!==port.generation)return false;
+      if(!current||current.status==="fenced"||current.status==="settled"||!isFutureAssignmentTime(current.expiresAt)||current.controllerGeneration!==port.generation)return false;
       await authorizeController(tx,current,port.generation);
       if(provider==="muse")return (await tx.execute(sql`update ${operationTable} set status='dispatched',updated_at=now() where id=${row.id}::uuid and status='reserved' returning id`)).length===1;
       return true;
@@ -119,7 +123,7 @@ export function createNativeExternalBroker<S>(db:Db,provider:Provider,identity:I
     return db.transaction(tx=>withExecutionAdmission(tx,authority.binding.companyId,authority.binding.agentId,authority.assignment.runId,async()=>{
       const b=await currentBinding(tx,authority.binding.id,authority.binding.generation);await assertCurrentAuthority(tx,b);
       const [a]=await tx.execute<Assignment>(sql`select ${assignmentColumns} from ${assignmentTable} where id=${id}::uuid and company_id=${b.companyId}::uuid and agent_id=${b.agentId}::uuid and binding_id=${b.id}::uuid and binding_generation=${b.generation} for update`);
-      if(!a||a.status==="fenced"||a.status==="settled"||a.expiresAt<=new Date()||a.controllerGeneration!==authority.assignment.controllerGeneration)throw conflict("Assignment changed before operation admission.");
+      if(!a||a.status==="fenced"||a.status==="settled"||!isFutureAssignmentTime(a.expiresAt)||a.controllerGeneration!==authority.assignment.controllerGeneration)throw conflict("Assignment changed before operation admission.");
       await authorizeController(tx,a,a.controllerGeneration);
       if(provider==="muse") {
         // Validate the presented access after every admission lock wait, before
@@ -135,7 +139,7 @@ export function createNativeExternalBroker<S>(db:Db,provider:Provider,identity:I
       if(provider==="muse") {
         if(command.action!=="accept"&&!a.claimedAt)throw conflict("Claim the assignment before running operations.");
         if(command.action==="accept") {
-          if(a.claimedAt||a.acceptBy<=new Date())throw conflict("Assignment already claimed or claim expired.");
+          if(a.claimedAt||!isFutureAssignmentTime(a.acceptBy))throw conflict("Assignment already claimed or claim expired.");
           await tx.execute(sql`update ${assignmentTable} set status='claimed',claimed_at=now() where id=${id}::uuid`);
           await tx.insert(externalAgentHolds).values({companyId:b.companyId,agentId:b.agentId,provider,assignmentId:id,bindingId:b.id,bindingGeneration:b.generation,runId:a.runId,workerUnknown:true}).onConflictDoNothing();
         }
