@@ -1,6 +1,6 @@
 {
-  "id": "4978b254-0d42-4bd3-97d2-2acafc786334",
-  "prevId": "ae1e19c3-c183-47f8-a4ee-cb4aa4322e5a",
+  "id": "c88ec89d-ff6e-4b78-8b80-068d3375a6d0",
+  "prevId": "4839b071-2dd1-4d71-ba1a-19b040d8d33f",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -47161,11 +47161,11 @@
       "checkConstraints": {
         "resource_lifecycle_events_resource_type_check": {
           "name": "resource_lifecycle_events_resource_type_check",
-          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project')"
+          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project', 'agent_runtime')"
         },
         "resource_lifecycle_events_action_check": {
           "name": "resource_lifecycle_events_action_check",
-          "value": "\"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
+          "value": "(\"resource_lifecycle_events\".\"resource_type\" = 'agent_runtime' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'delete')) OR \"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
         }
       },
       "isRLSEnabled": false
@@ -60844,12 +60844,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "grant_id": {
-          "name": "grant_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "generation": {
           "name": "generation",
           "type": "integer",
@@ -61038,22 +61032,6 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
-        },
-        "muse_bindings_active_grant_uq": {
-          "name": "muse_bindings_active_grant_uq",
-          "columns": [
-            {
-              "expression": "grant_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"muse_agent_bindings\".\"revoked_at\" IS NULL AND \"muse_agent_bindings\".\"grant_id\" IS NOT NULL",
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
         }
       },
       "foreignKeys": {
@@ -61081,19 +61059,6 @@
             "id"
           ],
           "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "muse_agent_bindings_grant_id_mcp_oauth_grants_id_fk": {
-          "name": "muse_agent_bindings_grant_id_mcp_oauth_grants_id_fk",
-          "tableFrom": "muse_agent_bindings",
-          "tableTo": "mcp_oauth_grants",
-          "columnsFrom": [
-            "grant_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },
@@ -62139,12 +62104,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "continuation_receipt_id": {
-          "name": "continuation_receipt_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "digest": {
           "name": "digest",
