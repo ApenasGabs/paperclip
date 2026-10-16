@@ -65,7 +65,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import { basename, dirname, join, posix, resolve } from "node:path";
 import type {
@@ -714,6 +714,7 @@ const NATIVE_PROVIDER_HOST_ENV_KEYS = [
   "TEMP",
   "TMP",
   "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR",
   "XDG_CONFIG_HOME",
   "XDG_CACHE_HOME",
   "XDG_DATA_HOME",
@@ -1659,7 +1660,7 @@ const executingNativeOwnerScopes = new Map<string, symbol>();
 
 async function assertExternalNativeRunAuthority(db: Db, execution: NativeExecutionInput, authorityDatabase: Db = db): Promise<void> {
   if (execution.schema === "paperclip.native-execution-input.v6") return dotRunnerBroker(db).assertRunAuthority(execution);
-  if (execution.schema === "paperclip.native-execution-input.v7") return museRunnerBroker(db).assertRunAuthority(execution, authorityDatabase);
+  if (execution.schema === "paperclip.native-execution-input.v8") return museRunnerBroker(db).assertRunAuthority(execution, authorityDatabase);
   throw new Error("external_native_execution_required");
 }
 
@@ -5400,6 +5401,7 @@ function nativeSessionConfigDigest(
         provider: execution.provider,
         driverKind: execution.session.driverKind,
         lifecyclePolicy: execution.session.lifecyclePolicy,
+        ...("homeMode" in execution ? { homeMode: execution.homeMode } : {}),
         executionMode:
           "executionMode" in execution ? execution.executionMode : "default",
         runtimeContextDigest:
@@ -5493,7 +5495,7 @@ export function resolveNativeHarnessPersistenceProfile(
 ): NativeHarnessPersistenceProfile {
   const providerDirectory: NativeHarnessPersistenceDirectory | null =
     execution.provider.kind === "codex"
-      ? {
+      ? ("homeMode" in execution && execution.homeMode === "preconfigured" ? null : {
           name: "codex-home",
           location: "filesystem",
           // Codex session history lives below this home, but these files are
@@ -5502,7 +5504,7 @@ export function resolveNativeHarnessPersistenceProfile(
           // bearer token. Re-materialize both for a replacement sandbox
           // instead of putting credentials into the disaster-recovery copy.
           excludeEntries: CODEX_HOME_NON_PERSISTENT_ENTRIES,
-        }
+        })
       : execution.provider.kind === "opencode"
         ? {
             name: "opencode",
@@ -7575,7 +7577,7 @@ export async function executePaperclipNativeSession(input: {
     await retireSupersededWarmNativeSessions(
       ownerScope, nativeSessionScopeKey(input.execution),
     );
-    if ((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7") && isCloudManagedInstance()
+    if ((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") && isCloudManagedInstance()
         && (!input.useRunnerd || input.runnerExecutionTarget?.kind !== "remote"
           || input.runnerExecutionTarget.transport !== "sandbox")) {
       throw new Error(input.execution.provider.kind === "muse" ? "muse_cloud_requires_managed_runner" : "dot_cloud_requires_managed_runner");
@@ -7600,7 +7602,7 @@ export async function executePaperclipNativeSession(input: {
     // a later sweep from closing an owner this turn is about to acquire.
     await closingWarmNativeSessions.get(sessionScopeId);
 
-    if (input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7") {
+    if (input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") {
       return await executePaperclipNativeSessionWithinScope(input);
     }
     const workspaceRoot = input.execution.workspace.cwd;
@@ -7717,7 +7719,7 @@ async function executePaperclipNativeSessionWithinScope(
     input.execution.provider.kind !== "aws_agentcore" &&
     input.execution.provider.kind !== "acpx" &&
     input.execution.schema !== "paperclip.native-execution-input.v6" &&
-    input.execution.schema !== "paperclip.native-execution-input.v7"
+    input.execution.schema !== "paperclip.native-execution-input.v8"
   ) {
     throw new Error("paperclip_runner_provider_unsupported");
   }
@@ -8668,7 +8670,7 @@ async function executePaperclipNativeSessionWithinScope(
       : null;
   }
   const runnerExecution: NativeExecutionInput =
-    input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v7" && input.useRunnerd && input.runnerExecutionTarget?.kind === "remote"
+    input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v8" && input.useRunnerd && input.runnerExecutionTarget?.kind === "remote"
       ? {
           ...input.execution,
           workspace: {
@@ -8687,7 +8689,7 @@ async function executePaperclipNativeSessionWithinScope(
     controller,
   });
   try {
-    if (input.managedGitHub && input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v7") {
+    if (input.managedGitHub && input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v8") {
       if (!input.execution.workspace.cwd) throw new Error("native_workspace_required");
       githubAccess ??= await timeController("github_access", () => createNativeGitHubAccess({
         scope: input.execution.binding,
@@ -9710,7 +9712,7 @@ async function executePaperclipNativeSessionWithinScope(
     resultJson: {
       nativeResult: native.result as unknown as Record<string, unknown>,
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
-      ...((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7") ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
+      ...((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
       ...(providerFailure ? { nativeProviderFailure: providerFailure.diagnostic } : {}),
       ...(unclassifiedTurnFailure ? { nativeTurnFailure: unclassifiedTurnFailure } : {}),
       ...(native.goalRolloverRequired ? { goalRolloverRequired: true } : {}),
@@ -9722,7 +9724,7 @@ async function executePaperclipNativeSessionWithinScope(
     ...resolveNativeBilling(input.execution.provider, input.runnerEnvironment, input.billingIdentity),
     model: input.execution.provider.model,
     usage: normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" }),
-    costUsd: input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v7" && normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
+    costUsd: input.execution.schema !== "paperclip.native-execution-input.v6" && input.execution.schema !== "paperclip.native-execution-input.v8" && normalizeNativeUsage(native.usage, { inputIncludesCacheReads: input.execution.provider.kind === "codex" })
       ? nativeUsageCostUsd(native.usage, input.execution.provider) ?? null : null,
     costUsdExact: typeof native.usage?.accountingCostUsdExact === "string" ? native.usage.accountingCostUsdExact : undefined,
     costStatus: nativeAccountingComplete && native.usage?.accountingCostIncomplete !== true
@@ -11526,7 +11528,7 @@ async function createRunnerdBackendWithinSessionClaim(
     museRuntime: input.execution.provider.kind === "muse",
     externalAuthorizingUserId: input.execution.provider.kind === "muse"
       ? await museRunnerBroker(input.db).authorizingUserIdForBinding(input.execution.provider.binding) : undefined,
-    assertBridgeAuthority: input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7" ? (database = input.db) => assertExternalNativeRunAuthority(input.db, input.execution, database) : undefined,
+    assertBridgeAuthority: input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8" ? (database = input.db) => assertExternalNativeRunAuthority(input.db, input.execution, database) : undefined,
     workspaceRoot: input.dotWorkspaceRoot ?? remoteTarget?.remoteCwd ?? input.execution.workspace.cwd ?? undefined,
     executionTargetKind: target.kind,
     readRemoteWorkspaceFile: remoteTarget && remoteCommandRunner
@@ -11566,7 +11568,7 @@ async function createRunnerdBackendWithinSessionClaim(
     input.durableEnvironmentLeaseId ??
     input.execution.binding.executionWorkspaceId;
   mkdirSync(root, { recursive: true, mode: 0o700 });
-  if (input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v7") {
+  if (input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") {
     if (target.kind === "remote" && input.dotWorkspaceRoot) throw new Error("dot_remote_workspace_access_unavailable");
     const remoteDot = target.kind === "remote"
       ? await prepareRemoteExternalRunner({ input, target, runner: remoteCommandRunner!, root,
@@ -11599,7 +11601,7 @@ async function createRunnerdBackendWithinSessionClaim(
         return nativeCompletionFeedback(input.db, externalExecution.binding.runId, result);
       },
     };
-    const backend = externalExecution.schema === "paperclip.native-execution-input.v7"
+    const backend = externalExecution.schema === "paperclip.native-execution-input.v8"
       ? createNativeSessionBackend(externalExecution, { ...backendOptions, museRunnerOptions: { ...externalOptions, port: museRunnerBroker(input.db).port(externalExecution) } })
       : createNativeSessionBackend(externalExecution, { ...backendOptions, dotRunnerOptions: { ...externalOptions, port: dotRunnerBroker(input.db).port(externalExecution) } });
     const prior = sessionToolAuthorityEpochs.get(sessionScopeId); if (prior) prior.revoke();
@@ -12819,6 +12821,7 @@ async function createRunnerdBackendWithinSessionClaim(
         },
       }
     : input.execution;
+  const preconfiguredHome = "homeMode" in input.execution && input.execution.homeMode === "preconfigured";
   const isGrok = input.execution.provider.kind === "acpx" && input.execution.provider.agent === "grok";
   let effectiveRunnerEnvironmentBase: NodeJS.ProcessEnv = {
     ...(isGrok
@@ -12841,6 +12844,32 @@ async function createRunnerdBackendWithinSessionClaim(
   // Never let an agent, environment binding, or host variable disable the
   // Codex sandbox for a local runner by supplying the same key.
   delete effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_EXTERNAL_SANDBOX;
+  delete effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_HOME_MODE;
+  if (preconfiguredHome) {
+    if (remoteCommandRunner) {
+      const discovered = await remoteCommandRunner.execute({
+        command: "sh", args: ["-c", 'getent passwd "$(id -u)" | cut -d: -f6'],
+        bypassSession: true, timeoutMs: 10_000,
+      });
+      const home = discovered.stdout.trim();
+      if (discovered.exitCode !== 0 || discovered.timedOut || !home.startsWith("/") || /[\0\r\n]/.test(home)) {
+        throw new Error("runner_preconfigured_remote_home_unavailable");
+      }
+      // Paths from the controller's account cannot select a remote account's config.
+      const hostPathKeys = new Set(["CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"]);
+      const configured = configuredEnvironment(effectiveRunnerEnvironmentBase);
+      for (const key of hostPathKeys) delete effectiveRunnerEnvironmentBase[key];
+      if (configured.PAPERCLIP_CONFIGURED_ENV_KEYS !== undefined) {
+        effectiveRunnerEnvironmentBase.PAPERCLIP_CONFIGURED_ENV_KEYS = JSON.stringify(
+          Object.keys(configured).filter(key => key !== "PAPERCLIP_CONFIGURED_ENV_KEYS" && !hostPathKeys.has(key)),
+        );
+      }
+      effectiveRunnerEnvironmentBase.HOME = home;
+    } else {
+      effectiveRunnerEnvironmentBase.HOME ??= userInfo().homedir;
+    }
+  }
+  if (preconfiguredHome) effectiveRunnerEnvironmentBase.PAPERCLIP_RUNNER_HOME_MODE = "preconfigured";
   const effectiveRunnerEnvironment: NodeJS.ProcessEnv = remoteRuntimeRoot
     ? {
         ...effectiveRunnerEnvironmentBase,
@@ -12848,8 +12877,10 @@ async function createRunnerdBackendWithinSessionClaim(
         // Codex's permission profile explicitly denies HOME and CODEX_HOME. If
         // either points at remoteCwd, that deny rule shadows the workspace write
         // grant and the provider cannot initialize its shell sandbox or edit.
-        HOME: posix.join(remoteRunnerFilesystemRoot!, "codex-home"),
-        CODEX_HOME: posix.join(remoteRunnerFilesystemRoot!, "codex-home"),
+        ...(preconfiguredHome ? {} : {
+          HOME: posix.join(remoteRunnerFilesystemRoot!, "codex-home"),
+          CODEX_HOME: posix.join(remoteRunnerFilesystemRoot!, "codex-home"),
+        }),
         PAPERCLIP_WORKSPACE_CWD: remoteTarget!.remoteCwd,
         ...(remoteTarget!.transport === "sandbox"
           ? { PAPERCLIP_RUNNER_EXTERNAL_SANDBOX: "1" }
@@ -12973,6 +13004,7 @@ async function createRunnerdBackendWithinSessionClaim(
     codexTransportFactory: (recoveryContext) =>
       createRunnerdCodexTransport({
         onSpawn: input.onSpawn,
+        homeMode: preconfiguredHome ? "preconfigured" : "isolated",
         onCredentialsUpdated: (event) => appendNativeCredentialUpdate(input.db, {
           companyId: input.execution.binding.companyId,
           agentId: input.execution.binding.agentId,
@@ -13004,7 +13036,8 @@ async function createRunnerdBackendWithinSessionClaim(
               piThinkingLevel: input.execution.provider.piThinkingLevel,
               acpxPermissionModePinned:
                 input.execution.schema === "paperclip.native-execution-input.v4" ||
-                input.execution.schema === "paperclip.native-execution-input.v5",
+                input.execution.schema === "paperclip.native-execution-input.v5" ||
+                input.execution.schema === "paperclip.native-execution-input.v7",
               acpxRuntimeDirectory: remoteRunnerFilesystemRoot
                 ? posix.join(remoteRunnerFilesystemRoot, "acpx")
                 : resolve(
@@ -13259,7 +13292,7 @@ async function createRunnerdBackendWithinSessionClaim(
         },
       });
     }
-    if (!input.managedAiCredentialHome || input.execution.provider.kind !== "codex" || boundManagedSessions.has(session)) return session;
+    if (preconfiguredHome || !input.managedAiCredentialHome || input.execution.provider.kind !== "codex" || boundManagedSessions.has(session)) return session;
     boundManagedSessions.add(session);
     const remoteAuth = remoteRunnerFilesystemRoot ? posix.join(remoteRunnerFilesystemRoot, "codex-home", "auth.json") : null;
     const localAuth = join(root, "codex-home", "auth.json");
