@@ -12,27 +12,40 @@ export const DEFAULT_ANTIGRAVITY_LOCAL_MODEL = "auto";
 
 export const models = [
   { id: DEFAULT_ANTIGRAVITY_LOCAL_MODEL, label: "Auto" },
-  // Gemini 3.5 family
+  // Gemini 4 Argon family
+  { id: "gemini-4-argon-high", label: "Gemini 4 Argon (High)" },
+  { id: "gemini-4-argon-medium", label: "Gemini 4 Argon (Medium)" },
+  { id: "gemini-4-argon-low", label: "Gemini 4 Argon (Low)" },
+  // Gemini 3.8 Flash family
+  { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+  { id: "gemini-3.8-flash-medium", label: "Gemini 3.8 Flash (Medium)" },
+  { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+  // Claude 5.5 family
+  { id: "claude-opus-5-5-high", label: "Claude Opus 5.5 (High)" },
+  { id: "claude-opus-5-5-medium", label: "Claude Opus 5.5 (Medium)" },
+  { id: "claude-opus-5-5-low", label: "Claude Opus 5.5 (Low)" },
+  { id: "claude-sonnet-5-5-high", label: "Claude Sonnet 5.5 (High)" },
+  { id: "claude-sonnet-5-5-medium", label: "Claude Sonnet 5.5 (Medium)" },
+  { id: "claude-sonnet-5-5-low", label: "Claude Sonnet 5.5 (Low)" },
+  // GPT / OSS
+  { id: "gpt-oss-120b-medium", label: "GPT-OSS 120B (Medium)" },
+  // Legacy / Compatibility labels
   { id: "Gemini 3.5 Flash (Medium)", label: "Gemini 3.5 Flash (Medium)" },
   { id: "Gemini 3.5 Flash (High)", label: "Gemini 3.5 Flash (High)" },
   { id: "Gemini 3.5 Flash (Low)", label: "Gemini 3.5 Flash (Low)" },
-  // Gemini 3.1 family
   { id: "Gemini 3.1 Pro (Low)", label: "Gemini 3.1 Pro (Low)" },
   { id: "Gemini 3.1 Pro (High)", label: "Gemini 3.1 Pro (High)" },
-  // Claude family
   { id: "Claude Sonnet 4.6 (Thinking)", label: "Claude Sonnet 4.6 (Thinking)" },
   { id: "Claude Opus 4.6 (Thinking)", label: "Claude Opus 4.6 (Thinking)" },
-  // GPT / OSS
-  { id: "GPT-OSS 120B (Medium)", label: "GPT-OSS 120B (Medium)" },
 ];
 
 export const modelProfiles: AdapterModelProfileDefinition[] = [
   {
     key: "cheap",
     label: "Cheap",
-    description: "Use Gemini 3.5 Flash (Low) as the lower-cost Antigravity CLI lane.",
+    description: "Use Gemini 3.8 Flash (Low) as the lower-cost Antigravity CLI lane.",
     adapterConfig: {
-      model: "Gemini 3.5 Flash (Low)",
+      model: "gemini-3.8-flash-low",
     },
     source: "adapter_default",
   },

@@ -22,6 +22,32 @@ export function printAntigravityStreamEvent(raw: string, _debug: boolean): void 
     return;
   }
 
+  const eventKind = asString(parsed.event).trim().toLowerCase();
+  if (eventKind === "init") {
+    const sessionId = asString(parsed.conversation_id ?? parsed.sessionId ?? parsed.session_id);
+    console.log(pc.blue(`Antigravity CLI init (session: ${sessionId})`));
+    return;
+  }
+  if (eventKind === "step_update") {
+    const stepUpdate = asRecord(parsed.step_update);
+    if (!stepUpdate) return;
+    const stepType = asString(stepUpdate.step_type).trim().toLowerCase();
+    const delta = asString(stepUpdate.text_delta).trim();
+    if (stepType === "agent_response" && delta) {
+      console.log(pc.green(`assistant: ${delta}`));
+    }
+    return;
+  }
+  if (eventKind === "result") {
+    const resultObj = asRecord(parsed.result);
+    if (!resultObj) return;
+    const status = asString(resultObj.status).trim().toUpperCase();
+    if (status && status !== "SUCCESS") {
+      console.log(pc.red(`error: ${asString(resultObj.error ?? resultObj.message ?? status)}`));
+    }
+    return;
+  }
+
   const type = asString(parsed.type).trim().toLowerCase();
 
   if (type === "system") {

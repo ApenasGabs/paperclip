@@ -24,6 +24,35 @@ export function parseAntigravityStdoutLine(line: string, ts: string): Transcript
     return [{ kind: "stdout", ts, text: line }];
   }
 
+  const eventKind = asString(parsed.event).trim().toLowerCase();
+  if (eventKind === "init") {
+    const sessionId = asString(parsed.conversation_id ?? parsed.sessionId ?? parsed.session_id);
+    return [{ kind: "init", ts, model: asString(parsed.model, "antigravity"), sessionId }];
+  }
+  if (eventKind === "step_update") {
+    const stepUpdate = asRecord(parsed.step_update);
+    if (!stepUpdate) return [];
+    const stepType = asString(stepUpdate.step_type).trim().toLowerCase();
+    const state = asString(stepUpdate.state).trim().toUpperCase();
+    const delta = asString(stepUpdate.text_delta).trim();
+    if (stepType === "agent_response" && delta) {
+      return [{ kind: "assistant", ts, text: delta }];
+    }
+    if (state === "ERROR") {
+      return [{ kind: "stderr", ts, text: asString(stepUpdate.error ?? stepUpdate.message ?? line) }];
+    }
+    return [];
+  }
+  if (eventKind === "result") {
+    const resultObj = asRecord(parsed.result);
+    if (!resultObj) return [];
+    const status = asString(resultObj.status).trim().toUpperCase();
+    if (status && status !== "SUCCESS") {
+      return [{ kind: "stderr", ts, text: asString(resultObj.error ?? resultObj.message ?? `Status: ${status}`) }];
+    }
+    return [];
+  }
+
   const type = asString(parsed.type).trim().toLowerCase();
 
   if (type === "system") {

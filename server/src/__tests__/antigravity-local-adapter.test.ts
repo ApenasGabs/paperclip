@@ -36,6 +36,53 @@ describe("antigravity_local parser", () => {
     const parsed = parseAntigravityOutput(stdout, stderr);
     expect(parsed.errorMessage).toBe("Error: Anthropic API key is invalid");
   });
+
+  it("parses real agy --output-format stream-json events with conversation_id and usage", () => {
+    const stdout = [
+      JSON.stringify({
+        event: "init",
+        conversation_id: "f4e091be-181e-47b2-9c40-e87c9db49a67",
+        init: { cwd: "/workspace", permission_mode: "always-proceed" },
+      }),
+      JSON.stringify({
+        event: "step_update",
+        step_update: {
+          conversation_id: "f4e091be-181e-47b2-9c40-e87c9db49a67",
+          step_index: 1,
+          state: "ACTIVE",
+          step_type: "agent_response",
+          text_delta: "pong",
+        },
+      }),
+      JSON.stringify({
+        event: "result",
+        result: {
+          conversation_id: "f4e091be-181e-47b2-9c40-e87c9db49a67",
+          status: "SUCCESS",
+          response: "pong\n",
+          duration_seconds: 5.63,
+          num_turns: 1,
+          usage: {
+            input_tokens: 17219,
+            output_tokens: 14,
+            thinking_tokens: 9,
+            cache_read_tokens: 219,
+            total_tokens: 17233,
+          },
+        },
+      }),
+    ].join("\n");
+
+    const parsed = parseAntigravityOutput(stdout, "");
+    expect(parsed.sessionId).toBe("f4e091be-181e-47b2-9c40-e87c9db49a67");
+    expect(parsed.summary).toBe("pong");
+    expect(parsed.usage).toEqual({
+      inputTokens: 17000,
+      cachedInputTokens: 219,
+      outputTokens: 23,
+    });
+    expect(parsed.errorMessage).toBeNull();
+  });
 });
 
 describe("antigravity_local stale session detection", () => {

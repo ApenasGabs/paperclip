@@ -1,14 +1,43 @@
-import { asString, parseJson } from "@paperclipai/adapter-utils/server-utils";
+import { asNumber, asString, parseJson, parseObject } from "@paperclipai/adapter-utils/server-utils";
 
-const CONVERSATION_ID_RE = /(?:conversation|session)(?:\s+id)?[:\s]+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+const CONVERSATION_ID_RE = /(?:conversation|session)(?:[\s_]+id)?["':\s]+([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/i;
+
+function extractUsageFromRecord(
+  usageRaw: unknown,
+  target: { inputTokens: number; cachedInputTokens: number; outputTokens: number },
+) {
+  const usage = parseObject(usageRaw);
+  if (Object.keys(usage).length === 0) return;
+
+  const input = asNumber(usage.input_tokens, asNumber(usage.inputTokens, 0));
+  const cached = asNumber(
+    usage.cache_read_tokens,
+    asNumber(usage.cached_input_tokens, asNumber(usage.cachedInputTokens, 0)),
+  );
+  const output = asNumber(usage.output_tokens, asNumber(usage.outputTokens, 0));
+  const thinking = asNumber(usage.thinking_tokens, asNumber(usage.thinkingTokens, 0));
+
+  if (input > 0 || cached > 0 || output > 0 || thinking > 0) {
+    target.inputTokens = Math.max(0, input - cached);
+    target.cachedInputTokens = cached;
+    target.outputTokens = output + thinking;
+  }
+}
 
 export function parseAntigravityOutput(stdout: string, stderr: string) {
   let sessionId: string | null = null;
   const messages: string[] = [];
+  const streamDeltas: string[] = [];
+  let finalResultResponse: string | null = null;
   let errorMessage: string | null = null;
+  let costUsd: number | null = null;
+  const usage = {
+    inputTokens: 0,
+    cachedInputTokens: 0,
+    outputTokens: 0,
+  };
 
-  // Extract session/conversation ID only from explicit "conversation id: <uuid>" patterns
-  // to avoid misidentifying UUIDs from tool results or file content as the session ID.
+  // Extract session/conversation ID from explicit patterns in stdout/stderr
   const combinedText = `${stdout}\n${stderr}`;
   const conversationMatch = combinedText.match(CONVERSATION_ID_RE);
   if (conversationMatch && conversationMatch[1]) {
@@ -24,12 +53,62 @@ export function parseAntigravityOutput(stdout: string, stderr: string) {
     if (line.startsWith("{") && line.endsWith("}")) {
       const event = parseJson(line);
       if (event) {
+        const directSessionId =
+          asString(event.conversation_id, "").trim() ||
+          asString(event.sessionId, "").trim() ||
+          asString(event.session_id, "").trim();
+        if (directSessionId) {
+          sessionId = directSessionId;
+        }
+
+        const eventKind = asString(event.event, "").trim().toLowerCase();
+        if (eventKind === "init") {
+          continue;
+        }
+        if (eventKind === "step_update") {
+          const stepUpdate = parseObject(event.step_update);
+          const stepSessionId = asString(stepUpdate.conversation_id, "").trim();
+          if (stepSessionId) sessionId = stepSessionId;
+          const stepType = asString(stepUpdate.step_type, "").trim().toLowerCase();
+          if (stepType === "agent_response") {
+            const delta = asString(stepUpdate.text_delta, "");
+            if (delta) streamDeltas.push(delta);
+          }
+          if (stepUpdate.usage) {
+            extractUsageFromRecord(stepUpdate.usage, usage);
+          }
+          continue;
+        }
+        if (eventKind === "result") {
+          const resultObj = parseObject(event.result);
+          const resultSessionId = asString(resultObj.conversation_id, "").trim();
+          if (resultSessionId) sessionId = resultSessionId;
+          const responseText = asString(resultObj.response, "").trim();
+          if (responseText) {
+            finalResultResponse = responseText;
+          }
+          const status = asString(resultObj.status, "").trim().toUpperCase();
+          if (status && status !== "SUCCESS") {
+            errorMessage = asString(resultObj.error ?? resultObj.message ?? `Antigravity run status: ${status}`, errorMessage ?? "");
+          }
+          if (resultObj.usage) {
+            extractUsageFromRecord(resultObj.usage, usage);
+          }
+          if (typeof resultObj.cost_usd === "number" && Number.isFinite(resultObj.cost_usd)) {
+            costUsd = resultObj.cost_usd;
+          }
+          continue;
+        }
+
         const type = asString(event.type, "").trim().toLowerCase();
         if (type === "error" || type === "stderr") {
           errorMessage = asString(event.message ?? event.error ?? event.text, errorMessage ?? "");
         } else if (type === "assistant" || type === "text") {
           const text = asString(event.text ?? event.content ?? event.message, "");
           if (text) messages.push(text);
+        }
+        if (event.usage) {
+          extractUsageFromRecord(event.usage, usage);
         }
         continue;
       }
@@ -50,15 +129,15 @@ export function parseAntigravityOutput(stdout: string, stderr: string) {
     }
   }
 
+  const summary =
+    finalResultResponse ??
+    (streamDeltas.length > 0 ? streamDeltas.join("").trim() : messages.join("\n").trim());
+
   return {
     sessionId,
-    summary: messages.join("\n").trim(),
-    usage: {
-      inputTokens: 0,
-      cachedInputTokens: 0,
-      outputTokens: 0,
-    },
-    costUsd: null as number | null,
+    summary,
+    usage,
+    costUsd,
     errorMessage: errorMessage || null,
   };
 }

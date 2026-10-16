@@ -445,13 +445,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     heartbeatPromptChars: renderedPrompt.length,
   };
 
+  const effort = asString(config.effort, "").trim();
+  const mode = asString(config.mode, "").trim();
+  const agentRole = asString(config.agent, "").trim();
+
   const buildArgs = (resumeSessionId: string | null) => {
     const args: string[] = [];
+    if (!extraArgs.includes("--output-format")) {
+      args.push("--output-format", "stream-json");
+    }
     if (resumeSessionId) {
       args.push("--conversation", resumeSessionId);
     }
     if (model && model !== DEFAULT_ANTIGRAVITY_LOCAL_MODEL) {
       args.push("--model", model);
+    }
+    if (effort) {
+      args.push("--effort", effort);
+    }
+    if (mode) {
+      args.push("--mode", mode);
+    }
+    if (agentRole) {
+      args.push("--agent", agentRole);
     }
     args.push("--dangerously-skip-permissions");
     if (sandbox) {
