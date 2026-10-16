@@ -147,6 +147,83 @@ describe("personal Muse control plane",()=>{
       expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
     }finally{release();await holder;await write;await instanceSettingsService(db).updateExperimental({enableMuse:true,enableNativeRunner:true});await f.detach();}
   });
+  it.each([
+    {deadline:"expired" as const,replay:false},
+    {deadline:"nonfinite" as const,replay:false},
+    {deadline:"expired" as const,replay:true},
+    {deadline:"nonfinite" as const,replay:true},
+  ])("rejects native document effects and receipt replay after assignment deadline changes during the real task-lock wait ($deadline, replay=$replay)",async({deadline,replay})=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,operation:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const checks:string[]=[],authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
+          checks.push(database===db?"discovery":"transaction");await f.broker.assertRunAuthority(execution,database);
+        }});
+      const idempotencyKey=randomUUID(),call={tool:"write_document",callId:randomUUID(),arguments:{key:"report",title:"Assignment authority",body:"MUSE_ASSIGNMENT_DEADLINE_DOCUMENT_CANARY",baseRevisionId:null,idempotencyKey}};
+      let priorResult:unknown;
+      if(replay){
+        priorResult=await authority.execute(call);
+        expect(priorResult).toMatchObject({disposition:"applied",document:{body:call.arguments.body}});
+        expect(await authority.execute({...call,callId:randomUUID()})).toEqual(priorResult);
+        expect(await documentService(db).listIssueDocumentRevisions(f.issue.id,"report")).toHaveLength(1);
+      }
+      const snapshot=async()=>({
+        run:await db.select({status:heartbeatRuns.status,resultJson:heartbeatRuns.resultJson}).from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)),
+        issueDocuments:await db.select().from(issueDocuments).where(eq(issueDocuments.issueId,f.issue.id)).orderBy(issueDocuments.id),
+        documents:await db.select().from(documents).where(eq(documents.companyId,f.company.id)).orderBy(documents.id),
+        revisions:await documentService(db).listIssueDocumentRevisions(f.issue.id,"report"),
+        activity:await db.select({id:activityLog.id,action:activityLog.action,entityId:activityLog.entityId}).from(activityLog).where(eq(activityLog.companyId,f.company.id)).orderBy(activityLog.id),
+        assignment:await db.select({status:assignments.status,acceptedResultAt:assignments.acceptedResultAt,finalizedAt:assignments.finalizedAt}).from(assignments).where(eq(assignments.id,f.assignment.id)),
+      });
+      const [initialAssignment]=await db.select().from(assignments).where(eq(assignments.id,f.assignment.id));
+      expect(initialAssignment.expiresAt).toBeInstanceOf(Date);
+      expect(Number.isFinite(initialAssignment.expiresAt.getTime())).toBe(true);
+      expect(initialAssignment.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      const before=await snapshot(),beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      checks.length=0;
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.id,f.issue.id))).for("update");ready();await gate;
+      });
+      await locked;
+      operation=authority.execute({...call,callId:randomUUID()}).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+          inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+          where waiter.datname=current_database() and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+              and tuple_lock.relation='issues'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)) as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      expect(checks).toEqual(["discovery"]);
+      if(deadline==="expired")await db.update(assignments).set({expiresAt:new Date(Date.now()-1)}).where(eq(assignments.id,f.assignment.id));
+      else await db.execute(sql`update muse_runner_assignments set expires_at='infinity'::timestamptz where id=${f.assignment.id}::uuid`);
+      const [changedAssignment]=await db.select().from(assignments).where(eq(assignments.id,f.assignment.id));
+      expect(changedAssignment.status).toBe("accepted");expect(changedAssignment.expiresAt).toBeInstanceOf(Date);
+      if(deadline==="expired")expect(changedAssignment.expiresAt.getTime()).toBeLessThan(Date.now());
+      else expect(Number.isFinite(changedAssignment.expiresAt.getTime())).toBe(false);
+      // Connection authority stays live; only the assignment deadline changed.
+      await expect(assertMuseSubjectCredential(db,f.subject,oauthResource)).resolves.toBeDefined();
+      expect((await inspectMuseConnectionCredential(db,f.binding,oauthResource)).state).toBe("active");
+      expect(checks).toEqual(["discovery"]);
+      release();await holder;
+      const outcome=await operation;
+      expect(checks).toEqual(["discovery","transaction"]);
+      expect(outcome.error).toMatchObject({status:403,message:"Muse assignment unavailable."});expect(outcome.result).toBeUndefined();
+      const after=await snapshot();expect(after).toEqual(before);expect(after.run[0].status).toBe("running");
+      const receipts=(after.run[0].resultJson as {semanticToolReceipts?:Record<string,unknown>}|null)?.semanticToolReceipts;
+      if(replay)expect(receipts?.[idempotencyKey]).toMatchObject({operationId:"write_document",input:call.arguments,result:priorResult});
+      else expect(receipts?.[idempotencyKey]).toBeUndefined();
+      expect(after.assignment).toEqual([{status:"accepted",acceptedResultAt:null,finalizedAt:null}]);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+    }finally{release();await Promise.allSettled([holder,operation]);await f.detach();}
+  });
   it("preserves the ordinary non-Muse document receipt path without invoking Muse authority",async()=>{
     const f=await active();try{
       await db.update(agents).set({adapterConfig:{provider:"codex"}}).where(eq(agents.id,f.agent.id));
