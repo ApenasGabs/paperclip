@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import type { HarnessRuntimeRequest, HarnessRuntimeRequestHandoff, HarnessRuntimeRequestResolution, HarnessDriver, HarnessDriverDescriptor, HarnessSession, OpenHarnessSessionInput, PersistedHarnessSession } from "../../contracts/harness-driver.js";
-import type { NativeExecutionInputV6, NativeExecutionInputV7 } from "../../contracts/native-execution.js";
+import type { NativeExecutionInputV6, NativeExecutionInputV8 } from "../../contracts/native-execution.js";
 import type { ExternalProviderPort } from "../../contracts/external-provider.js";
 import type { PrpEvent } from "../../protocol/replay-contract.js";
 import { validatePrpStructuredRunResult } from "../../protocol/replay-contract.js";
@@ -15,7 +15,7 @@ import { parsePaperclipQuestionSet } from "../../contracts/question-set.js";
 import type { CodexNativeSessionBackendOptions } from "../../backends/codex-native-backend.js";
 
 export interface RunnerdExternalDriverOptions {
-  execution: NativeExecutionInputV6 | NativeExecutionInputV7;
+  execution: NativeExecutionInputV6 | NativeExecutionInputV8;
   stateDirectory: string;
   identity: DurableRecoveryIdentity;
   port: ExternalProviderPort;

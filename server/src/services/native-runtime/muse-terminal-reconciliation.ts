@@ -17,7 +17,7 @@ export async function reconcileMuseNativeTerminalRun(db: Db, run: Pick<typeof he
   const execution = record(record(run.runnerProfileJson).nativeExecutionInput);
   const provider = record(execution.provider);
   const binding = record(provider.binding);
-  if (execution.schema !== "paperclip.native-execution-input.v7" || provider.kind !== "muse"
+  if (execution.schema !== "paperclip.native-execution-input.v8" || provider.kind !== "muse"
       || binding.companyId !== run.companyId || binding.agentId !== run.agentId
       || typeof binding.bindingId !== "string" || !binding.bindingId) return;
   await museRunnerBroker(db).reconcileTerminalAssignments(run.companyId, run.agentId, binding.bindingId).catch(err => {

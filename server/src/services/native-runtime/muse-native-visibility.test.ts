@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { LOW_TRUST_REVIEW_PRESET, DEFAULT_TRUST_PRESET } from "@paperclipai/shared";
-import { and, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, approvals, authUsers, companies, companyMemberships, createDb, documents, documentRevisions, externalAgentHolds, heartbeatRuns, instanceUserRoles, issueAccessGrants, issues, issueDocuments, issueThreadInteractions, principalPermissionGrants, projectAccessMembers, projects } from "@paperclipai/db";
+import { agents, approvals, authUsers, companies, companyMemberships, createDb, completionContracts, nativeRunResults, workAssessments, statusDecisions, issueApprovals, documents, documentRevisions, externalAgentHolds, heartbeatRuns, instanceUserRoles, issueAccessGrants, issues, issueDocuments, issueThreadInteractions, principalPermissionGrants, projectAccessMembers, projects } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
 import { approvalReadSqlCondition, authorizationService, canActorReadIssuePrivacy, issueReadSqlCondition, projectReadSqlCondition, type AuthorizationActor } from "../authorization.js";
 import { claimQueuedNativeReviewRun } from "./native-review-dispatch.js";
@@ -41,6 +41,84 @@ describe("Muse native visibility intersection", () => {
       assertBridgeAuthority: async () => {} });
     return { ...f, runId, authority };
   }
+
+  async function taskReadBoundaryFixture(restricted:boolean) {
+    const f=await documentFixture();
+    const [allowedProject,outsideProject]=await db.insert(projects).values([
+      {companyId:f.companyId,name:"Native allowed project"},{companyId:f.companyId,name:"Native outside project"},
+    ]).returning();
+    await db.update(issues).set({projectId:allowedProject.id}).where(eq(issues.id,f.issue.id));
+    if(restricted)await db.update(heartbeatRuns).set({contextSnapshot:{issueId:f.issue.id,executionPolicy:{authorizationPolicy:{trustPreset:LOW_TRUST_REVIEW_PRESET,trustBoundary:{mode:LOW_TRUST_REVIEW_PRESET,companyId:f.companyId,projectIds:[allowedProject.id]}}}}}).where(eq(heartbeatRuns.id,f.runId));
+    const [allowed,outside]=await db.insert(issues).values([
+      {companyId:f.companyId,parentId:f.issue.id,projectId:allowedProject.id,title:"MUSE_READ_SCOPE_ALLOWED",description:"MUSE_READ_ALLOWED_BODY",visibility:"open",status:"done"},
+      {companyId:f.companyId,parentId:f.issue.id,projectId:outsideProject.id,title:"MUSE_READ_SCOPE_OUTSIDE",description:"MUSE_READ_OUTSIDE_BODY",visibility:"open",status:"done"},
+    ]).returning();
+    const actor={...f.actor,runId:f.runId};
+    expect(await canActorReadIssuePrivacy(db,actor,outside)).toBe(true);
+    const decisions=await authorizationService(db).decideReads(actor,[allowed,outside].map(issue=>({type:"issue" as const,companyId:f.companyId,issueId:issue.id})));
+    expect(decisions.map(decision=>decision.allowed)).toEqual([true,!restricted]);
+    return {...f,allowed,outside};
+  }
+  async function recordedChildReview(f:Awaited<ReturnType<typeof taskReadBoundaryFixture>>,issueId:string) {
+    const contractId=randomUUID(),sourceRunId=randomUUID(),resultId=randomUUID(),assessmentId=randomUUID(),decisionId=randomUUID(),interactionId=randomUUID();
+    await db.insert(completionContracts).values({id:contractId,companyId:f.companyId,issueId,revision:1,schemaVersion:"paperclip.completion-contract.v1",policyVersion:"native-read-fixture",risk:"standard",completionAuthority:"server_arbiter",incompleteCriteriaPolicy:"preserve_non_terminal",contractJson:{objective:"Review child"},canonicalSha256:contractId,createdByActorType:"system",createdByActorId:"test"});
+    await db.insert(heartbeatRuns).values({id:sourceRunId,companyId:f.companyId,agentId:f.agentId,nativeIssueId:issueId,status:"succeeded",runtimeMode:"native",completionContractId:contractId});
+    await db.insert(nativeRunResults).values({id:resultId,companyId:f.companyId,issueId,runId:sourceRunId,completionContractId:contractId,serverFingerprint:resultId,schemaStatus:"accepted",resultJson:{},canonicalSha256:resultId});
+    await db.insert(workAssessments).values({id:assessmentId,companyId:f.companyId,issueId,runId:sourceRunId,contractId,resultId,triggerKind:"native_result",triggerActorCompanyId:f.companyId,priorIssueStatus:"in_progress",priorStatusVersion:0,policyVersion:"native-read-fixture",assessmentJson:{},inputDigest:assessmentId});
+    await db.insert(statusDecisions).values({id:decisionId,companyId:f.companyId,issueId,runId:sourceRunId,assessmentId,decisionVersion:1,policyVersion:"native-read-fixture",fromStatus:"in_progress",toStatus:"done",reasonCode:"explicit_review",decisionJson:{},decisionDigest:decisionId,applicationState:"applied"});
+    await db.insert(issueThreadInteractions).values({id:interactionId,companyId:f.companyId,issueId,kind:"request_confirmation",status:"accepted",sourceRunId,createdByAgentId:f.agentId,resolvedByUserId:f.authorizer,resolvedAt:new Date(),payload:{version:1,prompt:"Review child",target:{type:"custom",key:"native_completion_review",revisionId:decisionId}}});
+    return interactionId;
+  }
+  it.each([true,false].flatMap(restricted=>["search_tasks","child_tasks","child_review_outcomes","approval_tasks"].map(shape=>({restricted,shape}))))("applies ordinary per-task decisions to native Muse result collections ($shape; restricted: $restricted)",async({restricted,shape})=>{
+    const f=await taskReadBoundaryFixture(restricted);
+    let approvalId:string|undefined;
+    if(shape==="child_review_outcomes"){
+      await recordedChildReview(f,f.allowed.id);await recordedChildReview(f,f.outside.id);
+    }
+    if(shape==="approval_tasks"){
+      const [approval]=await db.insert(approvals).values({companyId:f.companyId,type:"hire_agent",status:"pending",payload:{issueId:f.issue.id}}).returning();approvalId=approval.id;
+      await db.insert(issueApprovals).values([f.allowed,f.outside].map(issue=>({companyId:f.companyId,issueId:issue.id,approvalId:approval.id,linkedByAgentId:f.agentId})));
+    }
+    const result=await f.authority.execute({tool:shape==="search_tasks"?"search_tasks":shape==="approval_tasks"?"get_approval_context":"get_task_context",callId:"per-task-"+shape,arguments:shape==="search_tasks"?{query:"MUSE_READ_SCOPE",limit:10}:shape==="approval_tasks"?{approvalId}:{}});
+    const ids=shape==="child_review_outcomes"
+      ?(result as {childReviewOutcomes:Array<{result:{childTaskId:string}}>}).childReviewOutcomes.map(row=>row.result.childTaskId)
+      :shape==="child_tasks"?(result as {childTasks:Array<{id:string}>}).childTasks.map(row=>row.id)
+      :(result as {tasks:Array<{id:string}>}).tasks.map(row=>row.id);
+    expect(ids).toContain(f.allowed.id);
+    if(restricted){expect(ids).not.toContain(f.outside.id);for(const value of [f.outside.id,f.outside.title,f.outside.description])expect(JSON.stringify(result)).not.toContain(value);}
+    else expect(ids).toContain(f.outside.id);
+    if(shape==="search_tasks"){
+      const outsideOnly=await f.authority.execute({tool:"search_tasks",callId:"outside-only",arguments:{query:"MUSE_READ_SCOPE_OUTSIDE",limit:1}});
+      expect(outsideOnly).toMatchObject({tasks:restricted?[]:[{id:f.outside.id}]});
+    }
+  });
+  it("retains the child search fallback when the authorized child follows a capped denied prefix",async()=>{
+    const f=await taskReadBoundaryFixture(true),older=new Date("2026-01-01T00:00:00.000Z"),newer=new Date("2026-01-01T01:00:00.000Z");
+    await db.update(issues).set({createdAt:older}).where(eq(issues.id,f.allowed.id));
+    await db.update(issues).set({createdAt:newer}).where(eq(issues.id,f.outside.id));
+    const denied=await db.insert(issues).values(Array.from({length:100},(_,index)=>({
+      id:f.companyId.slice(0,24)+index.toString(16).padStart(12,"0"),companyId:f.companyId,parentId:f.issue.id,
+      projectId:f.outside.projectId,title:"MUSE_DENIED_PREFIX_"+index,description:"MUSE_DENIED_PREFIX_BODY_"+index,
+      visibility:"open",status:"done",createdAt:newer,
+    }))).returning();
+    const actor={...f.actor,runId:f.runId};
+    const candidates=await db.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.companyId),eq(issues.parentId,f.issue.id),await issueReadSqlCondition(db,actor)))
+      .orderBy(desc(issues.createdAt),desc(issues.id)).limit(101);
+    expect(candidates.map(row=>row.id)).toEqual([f.outside.id,...denied.map(row=>row.id)].sort().reverse());
+    expect(candidates.map(row=>row.id)).not.toContain(f.allowed.id);
+    const result=await f.authority.execute({tool:"get_task_context",callId:"capped-denied-prefix",arguments:{}}) as {childTasksTruncated:boolean;childTasks:Array<{id:string}>};
+    expect(result.childTasksTruncated).toBe(true);
+    expect(result.childTasks).toEqual([]);
+    for(const row of [f.outside,...denied])for(const value of [row.id,row.title,row.description])expect(JSON.stringify(result)).not.toContain(value);
+    expect(await f.authority.execute({tool:"search_tasks",callId:"older-authorized-search",arguments:{query:"MUSE_READ_SCOPE_ALLOWED",limit:1}}))
+      .toMatchObject({tasks:[{id:f.allowed.id,title:f.allowed.title,description:f.allowed.description}]});
+  });
+  it("preserves ordinary unrestricted native task search results",async()=>{
+    const f=await taskReadBoundaryFixture(false);
+    await db.update(agents).set({adapterConfig:{provider:"codex"}}).where(eq(agents.id,f.agentId));
+    const authority=new PaperclipRunnerToolAuthority(db,{companyId:f.companyId,agentId:f.agentId,issueId:f.issue.id,runId:f.runId});
+    expect(await authority.execute({tool:"search_tasks",callId:"ordinary-search",arguments:{query:"MUSE_READ_SCOPE",limit:10}})).toMatchObject({tasks:expect.arrayContaining([{...f.allowed},{...f.outside}].map(task=>expect.objectContaining({id:task.id,title:task.title,description:task.description})))});
+  });
 
   it("tags actual Muse native document writes with the retained low-trust run before storing or replaying them", async () => {
     const f = await documentFixture(true);

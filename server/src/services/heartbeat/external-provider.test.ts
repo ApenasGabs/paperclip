@@ -24,7 +24,7 @@ describe("shared external heartbeat classification", () => {
     const agent = { adapterType: "paperclip_runner", adapterConfig: { provider } };
     expect(heartbeatExternalProvider({ agent, run: { runtimeMode: "legacy", runnerProfileJson: null } })).toBe(provider);
     const admitted = execution(provider);
-    expect(admitted.schema).toBe(provider === "muse" ? "paperclip.native-execution-input.v7" : "paperclip.native-execution-input.v6");
+    expect(admitted.schema).toBe(provider === "muse" ? "paperclip.native-execution-input.v8" : "paperclip.native-execution-input.v6");
     expect(admitted.provider.kind).toBe(provider);
     expect(admitted.session.driverKind).toBe(provider === "muse" ? "muse_external" : provider === "grok_bot" ? "grok_bot_mcp" : "openai_dot_mcp");
     expect(heartbeatExternalProvider({ agent: { ...agent, adapterConfig: { provider: "codex" } },

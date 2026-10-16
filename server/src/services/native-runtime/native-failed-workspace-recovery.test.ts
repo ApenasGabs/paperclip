@@ -78,7 +78,7 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
 
   async function bindExternalInput(f: Awaited<ReturnType<typeof seed>>, provider: "grok_bot" | "openai_dot" | "muse", change?: (input: { schema: string; binding: { runId: string; companyId: string; agentId: string; issueId: string }; provider: { kind: string; bridgeRevision?: string }; workspace: { access: string; cwd: string | null } }) => void) {
     const run = await readRun(f.runId);
-    const input = { schema: provider === "muse" ? "paperclip.native-execution-input.v7" : "paperclip.native-execution-input.v6",
+    const input = { schema: provider === "muse" ? "paperclip.native-execution-input.v8" : "paperclip.native-execution-input.v6",
       binding: { runId: f.runId, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId },
       provider: { kind: provider, ...(provider === "muse" ? { bridgeRevision: "muse-v1" } : {}) }, workspace: { access: "none", cwd: null, repoUrl: null, repoRef: null, branchName: null } };
     change?.(input);

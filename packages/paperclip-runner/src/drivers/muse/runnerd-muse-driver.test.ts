@@ -8,7 +8,7 @@ import { describeRunnerdNativeSessionBackend } from "../../backends/codex-native
 import { createNativeSessionBackend } from "../../backends/native-backend-factory.js";
 import * as controlPlane from "../../control-plane/durable-prp-control-plane.js";
 import { externalOperationDigest, type ExternalProviderOperation } from "../../contracts/external-provider.js";
-import { buildNativeModelEnvelope, parseNativeExecutionInput, type NativeExecutionInputV7 } from "../../contracts/native-execution.js";
+import { buildNativeModelEnvelope, parseNativeExecutionInput, type NativeExecutionInputV8 } from "../../contracts/native-execution.js";
 import { NATIVE_RUNTIME_ASSET_SCHEMA, PAPERCLIP_EXECUTION_PROMPT, PAPERCLIP_EXECUTION_PROMPT_REVISION,
   nativeRuntimePromptDigest, canonicalNativeRuntimeContextDigest } from "../../contracts/runtime-context.js";
 
@@ -18,7 +18,7 @@ import type { NativeSession } from "../../contracts/native-session-backend.js";
 import type { ControlPlanePort } from "../../contracts/control-plane-port.js";
 import type { PrpEvent } from "../../protocol/replay-contract.js";
 import { digestPaperclipSemanticContent } from "../../semantic-tools/receipts.js";
-function execution(root: string): NativeExecutionInputV7 {
+function execution(root: string): NativeExecutionInputV8 {
   const companyId = randomUUID(), agentId = randomUUID();
   const digest = "0".repeat(64);
   const context = {
@@ -27,7 +27,7 @@ function execution(root: string): NativeExecutionInputV7 {
     skills: [], mcp: { assignmentSetId: "none", digest, bindingId: null },
   };
   return parseNativeExecutionInput({
-    schema: "paperclip.native-execution-input.v7",
+    schema: "paperclip.native-execution-input.v8",
     binding: { companyId, agentId, runId: randomUUID(), issueId: randomUUID(), executionWorkspaceId: randomUUID() },
     task: { identifier: "DOT-1", title: "Synthetic bridge recovery", description: null, prompt: "Read the synthetic counter.", workMode: "standard" },
     provider: { kind: "muse", model: null, bridgeRevision: "muse-v1", binding: { companyId, agentId, bindingId: randomUUID(), bindingGeneration: 1,
@@ -38,13 +38,15 @@ function execution(root: string): NativeExecutionInputV7 {
     completionContract: { id: randomUUID(), sha256: "sha256:" + digest, schemaVersion: "paperclip.completion-contract.v1",
       contract: { revision: "1", objective: "Read the counter", criteria: [{ id: "objective", requirement: "Read the counter" }] } },
     runtimeContext: { ...context, aggregateDigest: canonicalNativeRuntimeContextDigest(context) }, interactionResponses: [], credentialBindings: [],
-  }) as NativeExecutionInputV7;
+  }) as NativeExecutionInputV8;
 }
 
-it("v7 closes Muse authority, workspace, credentials and bridge revision", () => {
+it("v8 closes Muse authority, workspace, credentials and bridge revision", () => {
   const input = execution("/synthetic/pinned-instructions");
   expect(buildNativeModelEnvelope(input).workspace).toBeNull();
   for (const changed of [
+    { ...input, schema: "paperclip.native-execution-input.v7" },
+    { ...input, homeMode: "preconfigured" },
     { ...input, provider: { ...input.provider, bridgeRevision: "dot-mcp-v1" } },
     { ...input, session: { ...input.session, driverKind: "openai_dot_mcp" } },
     { ...input, workspace: { ...input.workspace, cwd: "/private/project" } },

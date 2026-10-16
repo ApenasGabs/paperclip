@@ -612,6 +612,9 @@ export class PaperclipRunnerToolAuthority {
           ))
           .orderBy(desc(issues.createdAt), desc(issues.id))
           .limit(101);
+        const readableChildren = this.binding.museRuntime
+          ? await this.#readableMuseTaskIds(context.run, childTasks.map(task => task.id)) : null;
+        const visibleChildTasks = readableChildren ? childTasks.filter(task => readableChildren.has(task.id)) : childTasks;
         return {
           company: { id: this.binding.companyId },
           actor: redactedActor(context.actor),
@@ -619,7 +622,7 @@ export class PaperclipRunnerToolAuthority {
             ...this.binding, conversationMode: isConversation(context.issue),
           }),
           activeTask: redactedTask(context.issue),
-          childTasks: childTasks.slice(0, 100).map(redactedTask),
+          childTasks: visibleChildTasks.slice(0, 100).map(redactedTask),
           childTasksTruncated: childTasks.length > 100,
           delegationGuidance: "Reuse existing child tasks for delegated work. Inspect a completed child's comments and documents before creating another task for the same deliverable. Use search_tasks if the child task list is truncated.",
           run: {
@@ -630,7 +633,7 @@ export class PaperclipRunnerToolAuthority {
           connectionGuidance: CONNECTION_INTENT_AGENT_GUIDANCE,
           acceptedPlan: await this.#acceptedPlan(context.run.contextSnapshot, context.issue),
           sourcePlanApproval: await this.#sourcePlanApproval(context),
-          childReviewOutcomes: await childReviewOutcomes(this.db, this.binding.companyId, this.binding.issueId, this.#privacyActor(context.run)),
+          childReviewOutcomes: await this.#readableChildReviewOutcomes(context.run),
           ...(this.binding.nativeReview ? {
             assignedReview: (await getNativeReviewAssignment(this.db, {
               ...this.binding, contextSnapshot: this.binding.nativeReview,
@@ -668,10 +671,13 @@ export class PaperclipRunnerToolAuthority {
         const tasks = await issueService(this.db).list(this.binding.companyId, { readCondition: await issueReadSqlCondition(this.db, this.#privacyActor(context.run)) });
         const query = typeof input.query === "string" ? input.query.toLowerCase() : "";
         const statuses = Array.isArray(input.statuses) ? new Set(input.statuses.filter((value): value is string => typeof value === "string")) : null;
-        return { tasks: tasks.filter((task) =>
+        const matching = tasks.filter((task) =>
           (!query || `${task.identifier} ${task.title} ${task.description ?? ""}`.toLowerCase().includes(query))
           && (!statuses || statuses.size === 0 || statuses.has(task.status))
-        ).slice(0, boundedLimit(input.limit)).map(redactedTask) };
+        );
+        const readable = this.binding.museRuntime ? await this.#readableMuseTaskIds(context.run, matching.map(task => task.id)) : null;
+        return { tasks: matching.filter(task => !readable || readable.has(task.id))
+          .slice(0, boundedLimit(input.limit)).map(redactedTask) };
       }
       case "list_documents":
         return { documents: await this.#visibleMuseDocuments(context.issue,
@@ -714,7 +720,8 @@ export class PaperclipRunnerToolAuthority {
             eq(issues.companyId, this.binding.companyId),
             await issueReadSqlCondition(this.db, this.#privacyActor(context.run)),
           ));
-        return { approval, tasks: tasks.map((row) => row.issue) };
+        const readable = this.binding.museRuntime ? await this.#readableMuseTaskIds(context.run, tasks.map(row => row.issue.id)) : null;
+        return { approval, tasks: tasks.filter(row => !readable || readable.has(row.issue.id)).map(row => row.issue) };
       }
       case "report_progress": return this.#reportProgress(input);
       case "request_human_input": return this.#requestHumanInput(input,
@@ -1050,6 +1057,24 @@ export class PaperclipRunnerToolAuthority {
     const context = await this.#boundContext();
     if (!(await canActorReadApproval(this.db, this.#privacyActor(context.run), id))) throw new Error("paperclip_runner_approval_not_found");
     return approval;
+  }
+
+  async #readableMuseTaskIds(run: { responsibleUserId: string | null }, taskIds: string[]): Promise<Set<string>> {
+    const ids = [...new Set(taskIds)];
+    if (!ids.length) return new Set();
+    const decisions = await authorizationService(this.db).decideReads(this.#privacyActor(run),
+      ids.map(issueId => ({ type: "issue", companyId: this.binding.companyId, issueId })));
+    return new Set(ids.filter((_id, index) => decisions[index]?.allowed));
+  }
+
+  async #readableChildReviewOutcomes(run: { responsibleUserId: string | null }) {
+    const outcomes = await childReviewOutcomes(this.db, this.binding.companyId, this.binding.issueId, this.#privacyActor(run));
+    if (!this.binding.museRuntime) return outcomes;
+    const taskId = (outcome: (typeof outcomes)[number]) => record(outcome.result).childTaskId;
+    const readable = await this.#readableMuseTaskIds(run, outcomes.flatMap(outcome => {
+      const id = taskId(outcome); return typeof id === "string" ? [id] : [];
+    }));
+    return outcomes.filter(outcome => { const id = taskId(outcome); return typeof id === "string" && readable.has(id); });
   }
 
   #privacyActor(run: { responsibleUserId: string | null }): AuthorizationActor {

@@ -54,7 +54,7 @@ export function createNativeSessionBackend(
   input: NativeExecutionInput,
   options: NativeBackendFactoryOptions = {},
 ): NativeSessionBackend {
-  if (input.schema === "paperclip.native-execution-input.v7") {
+  if (input.schema === "paperclip.native-execution-input.v8") {
     if (!options.museRunnerOptions) throw new Error("Muse requires an admitted broker port and Rust Runner authority");
     return new HarnessDriverBackend(new RunnerdMuseDriver({ ...options.museRunnerOptions, execution: input,
       dynamicTools: options.dynamicTools, dynamicToolHandler: options.dynamicToolHandler,

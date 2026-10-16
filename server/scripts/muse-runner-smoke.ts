@@ -134,7 +134,7 @@ async function accept(work: Json): Promise<void> {
   assert.equal(run.runtimeMode, "native"); assert.equal(run.driverKind, "muse_external");
   assert.equal(run.status, "running");
   const profile = object(object(run.runnerProfileJson).nativeExecutionInput);
-  assert.equal(profile.schema, "paperclip.native-execution-input.v7");
+  assert.equal(profile.schema, "paperclip.native-execution-input.v8");
   assert.equal(object(profile.workspace).access, "none");
   step("native-accepted", { turn: runIds.length, runId });
 }
