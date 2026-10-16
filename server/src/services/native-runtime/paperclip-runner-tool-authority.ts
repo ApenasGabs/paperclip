@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { skillAccessService } from "../skill-access.js";
 import { withExternalExecutionAdmission, type ExternalAdmissionTransaction } from "../../modules/external-agents/index.js";
 import { callTaskWorkspaceTool } from "../task-workspace-tools.js";
@@ -1724,6 +1725,7 @@ export class PaperclipRunnerToolAuthority {
         return { taskId: target.id, status: target.status, monitor: replayMonitor };
       }
       const patch = prepareIssueMonitorUpdate(target, input.monitor, actor);
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
       const [updated] = await tx.update(issues).set({ ...patch, updatedAt: new Date() })
         .where(and(eq(issues.id, target.id), eq(issues.companyId, this.binding.companyId))).returning();
       if (!updated) throw notFound("Task not found");
