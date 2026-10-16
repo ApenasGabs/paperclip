@@ -1,3 +1,4 @@
+import { stageRemoteLaunchAssets } from "./remote-launch-assets.js";
 import { createRunPreparationTiming } from "../execution-preparation-timing.js";
 import { configuredEnvironment } from "../../vendor/paperclip-runner/index.js";
 import { apiKeyBillingType } from "@paperclipai/adapter-utils/api-billing-type";
@@ -12229,42 +12230,6 @@ async function createRunnerdBackendWithinSessionClaim(
     return backup;
   };
 
-  const materializeRemoteHarnessLaunchState = async () => {
-    if (!remoteTarget || !remoteCommandRunner) return;
-    for (const directory of persistenceProfile.directories) {
-      if (directory.location !== "filesystem") continue;
-      const targetPath = remotePersistencePath(directory);
-      if (!targetPath) throw new Error("runner_harness_state_mismatch: bootstrap_target_unavailable");
-      const escapedTarget = targetPath.replaceAll("'", "'\\''");
-      const created = await remoteCommandRunner.execute({
-        command: "sh",
-        args: ["-c", `umask 077; install -d -m 0700 '${escapedTarget}'`],
-        bypassSession: true,
-        timeoutMs: 10_000,
-      });
-      if (created.exitCode !== 0 || created.timedOut) {
-        throw new Error("runner_remote_directory_staging_failed");
-      }
-
-      // Codex launch credentials are intentionally excluded from failover
-      // backups. Re-materialize only those launch-time files into a fresh or
-      // replacement sandbox after the durable history has been restored.
-      if (directory.name !== "codex-home") continue;
-      const localDirectory = resolve(root, directory.name);
-      for (const name of ["auth.json", "config.toml"] as const) {
-        const sourcePath = resolve(localDirectory, name);
-        if (!existsSync(sourcePath)) continue;
-        await stageRemoteRunnerFile({
-          target: remoteTarget,
-          runner: remoteCommandRunner,
-          sourcePath,
-          targetPath: posix.join(targetPath, name),
-          mode: 0o600,
-        });
-      }
-    }
-  };
-
   const ensureRemoteRunner = async (stageLaunchAssets = true) => {
     await measureNativeRunnerSpan(
       input.trace,
@@ -12467,67 +12432,24 @@ async function createRunnerdBackendWithinSessionClaim(
         // this invocation's isolated Codex auth/config. The later launch must
         // still stage those fresh files even when history was already restored.
         // Launch material is never recovered from a failover backup.
-        await measureNativeRunnerSpan(input.trace, "harness_state.launch_material", () => materializeRemoteHarnessLaunchState());
-        if (
-          remoteTarget &&
-          remoteCommandRunner &&
-          remoteRunnerFilesystemRoot &&
-          sourceRuntimeContext &&
-          remoteRuntimeContext
-        ) {
-          await measureNativeRunnerSpan(
-            input.trace,
-            "stage.asset.runtime_context",
-            async () => {
-              await stageRemoteRunnerDirectory({
-                target: remoteTarget,
-                runner: remoteCommandRunner,
-                sourcePath: sourceRuntimeContext.instructions.bundle.rootPath,
-                targetPath: remoteRuntimeContext.instructions.bundle.rootPath,
-                mode: 0o555,
-              });
-              for (
-                let index = 0;
-                index < sourceRuntimeContext.skills.length;
-                index += 1
-              ) {
-                await stageRemoteRunnerDirectory({
-                  target: remoteTarget,
-                  runner: remoteCommandRunner,
-                  sourcePath:
-                    sourceRuntimeContext.skills[index]!.bundle.rootPath,
-                  targetPath:
-                    remoteRuntimeContext.skills[index]!.bundle.rootPath,
-                  mode: 0o555,
-                });
-              }
-              await stageRemoteRunnerFile({
-                target: remoteTarget,
-                runner: remoteCommandRunner,
-                sourcePath: resolve(root, "runtime-context.json"),
-                targetPath: posix.join(
-                  remoteRunnerFilesystemRoot,
-                  "runtime-context.json",
-                ),
-                mode: 0o600,
-              });
-            },
-          );
-        }
-        if (remoteTarget && remoteCommandRunner && remoteCaBundleMapping) {
-          const caBundleMapping = remoteCaBundleMapping;
-          await measureNativeRunnerSpan(
-            input.trace,
-            "stage.asset.ca_bundle",
-            () =>
-              stageRemoteRunnerFile({
-                target: remoteTarget,
-                runner: remoteCommandRunner,
-                sourcePath: caBundleMapping.sourcePath,
-                targetPath: caBundleMapping.targetPath,
-                mode: 0o600,
-              }),
-          );
+        if (remoteTarget && remoteCommandRunner) {
+          await stageRemoteLaunchAssets({
+            root,
+            transport: remoteTarget.transport,
+            runner: remoteCommandRunner,
+            persistenceDirectories: persistenceProfile.directories.map(directory => ({
+              name: directory.name,
+              location: directory.location,
+              targetPath: remotePersistencePath(directory),
+            })),
+            runtimeContext: remoteRunnerFilesystemRoot && sourceRuntimeContext && remoteRuntimeContext
+              ? { source: sourceRuntimeContext, target: remoteRuntimeContext, filesystemRoot: remoteRunnerFilesystemRoot }
+              : null,
+            caBundleMapping: remoteCaBundleMapping,
+            stageFile: asset => stageRemoteRunnerFile({ target: remoteTarget, runner: remoteCommandRunner, ...asset }),
+            stageDirectory: asset => stageRemoteRunnerDirectory({ target: remoteTarget, runner: remoteCommandRunner, ...asset }),
+            trace: input.trace,
+          });
         }
       },
       {
