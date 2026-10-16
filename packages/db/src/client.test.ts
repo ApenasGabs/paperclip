@@ -174,12 +174,16 @@ const mergedMasterTail = [
   { file: "0345_luxuriant_carmella_unuscione.sql", when: 1791978393174, hash: "d1b360d9e6acf060a67e91b5d6dc3952f9804da3d512c7097a928b30360f6426" },
   { file: "0346_cloudy_whiplash.sql", when: 1791989860950, hash: "a77d0b71eb96b4de14bbc60f5e5f00043bffacc09905ffc782f5f0cb818c4252" },
 ] as const;
+const canonicalMasterTail = [
+  { file: "0347_flippant_imperial_guard.sql", when: 1792100545989, hash: "e159aba238be8e27e16adec236adee0febe29191ff1b4cf9cbb8d254910f4f8f" },
+  { file: "0348_agent_skill_runtime_hooks.sql", when: 1792101163248, hash: "22115f83622ba83f2f494a4637f3ce404afbdf8717a5dea106421223e64d0b93" },
+] as const;
 const mergedMuseTail = [
-  { file: "0347_flimsy_sunset_bain.sql", oldFile: "0344_perpetual_eternity.sql", when: 1791904391794, hash: "5c422698d40da1d6cdc587134553e371f7c807ce9617e07d7ff77eb05810ae49" },
-  { file: "0348_dusty_thaddeus_ross.sql", oldFile: "0345_lumpy_celestials.sql", when: 1791904404725, hash: "a9373b52e02fa985bf10c15da91f6681c49d8726d94d5d68fd77e5802fd47a68" },
-  { file: "0349_perfect_darwin.sql", oldFile: "0346_powerful_epoch.sql", when: 1791904422315, hash: "65f4f08c6a8fed7396db491e0691e693636f48c4ca4fa63cd2057af38039861a" },
-  { file: "0350_tan_fallen_one.sql", oldFile: "0347_big_meggan.sql", when: 1791904430408, hash: "1d2d5834fd499b60a43778d6d14b2520e3e2980258b8c0997d80cb95465f4abf" },
-  { file: "0351_cuddly_thanos.sql", oldFile: "0348_foamy_lightspeed.sql", when: 1791905947460, hash: "1a379bc03d80c34815546bb9f50bf1408ccf156f4a1df2d86edb0a01acdc55c0" },
+  { file: "0349_oval_dragon_lord.sql", oldFile: "0344_perpetual_eternity.sql", when: 1791904391794, hash: "5c422698d40da1d6cdc587134553e371f7c807ce9617e07d7ff77eb05810ae49" },
+  { file: "0350_friendly_rhodey.sql", oldFile: "0345_lumpy_celestials.sql", when: 1791904404725, hash: "a9373b52e02fa985bf10c15da91f6681c49d8726d94d5d68fd77e5802fd47a68" },
+  { file: "0351_hard_albert_cleary.sql", oldFile: "0346_powerful_epoch.sql", when: 1791904422315, hash: "65f4f08c6a8fed7396db491e0691e693636f48c4ca4fa63cd2057af38039861a" },
+  { file: "0352_special_warbound.sql", oldFile: "0347_big_meggan.sql", when: 1791904430408, hash: "1d2d5834fd499b60a43778d6d14b2520e3e2980258b8c0997d80cb95465f4abf" },
+  { file: "0353_skinny_gamma_corps.sql", oldFile: "0348_foamy_lightspeed.sql", when: 1791905947460, hash: "1a379bc03d80c34815546bb9f50bf1408ccf156f4a1df2d86edb0a01acdc55c0" },
 ] as const;
 
 describeEmbeddedPostgres("merged Muse migration histories", () => {
@@ -204,12 +208,12 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
     return Array.from(await sql`SELECT id, hash, created_at::text AS created_at FROM drizzle.__drizzle_migrations ORDER BY id`);
   }
 
-  async function replayHistoricalSchema(sql: ReturnType<typeof postgres>, entries: Array<{ file: string; when: number; hash: string }>) {
+  async function replayHistoricalSchema(sql: ReturnType<typeof postgres>, entries: Array<{ file: string; oldFile?: string; when: number; hash: string }>) {
     await sql`CREATE SCHEMA drizzle`;
     await sql`CREATE TABLE drizzle.__drizzle_migrations (id SERIAL PRIMARY KEY, hash text NOT NULL, created_at bigint)`;
     let createdAt = 0;
     for (const entry of entries) {
-      const content = await fs.promises.readFile(new URL(`./migrations/${entry.file}`, import.meta.url), "utf8");
+      const content = await fs.promises.readFile(new URL(entry.oldFile ? `./__fixtures__/muse-preview-migrations/${entry.oldFile}` : `./migrations/${entry.file}`, import.meta.url), "utf8");
       expect(createHash("sha256").update(content).digest("hex")).toBe(entry.hash);
       createdAt = Math.max(createdAt + 1, entry.when);
       const applyMigration = async (executor: Pick<ReturnType<typeof postgres>, "unsafe">) => {
@@ -278,9 +282,13 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
       })));
       const prefixIdentity = common.map(({ entry, hash }) => [entry.idx, entry.version, entry.when, entry.tag, entry.breakpoints, hash]);
       expect(createHash("sha256").update(JSON.stringify(prefixIdentity)).digest("hex")).toBe("18063d01d91c172c556ee0bc7e84eaa35dc7c4b00b07e817c471cdf392393454");
-      for (const entry of [...mergedMasterTail, ...mergedMuseTail]) {
+      for (const entry of [...mergedMasterTail, ...canonicalMasterTail]) {
         expect(await migrationHash(entry.file)).toBe(entry.hash);
         expect(journal.entries.find(candidate => `${candidate.tag}.sql` === entry.file)?.when).toBe(entry.when);
+      }
+      for (const entry of mergedMuseTail) {
+        expect(await migrationHash(entry.file)).not.toBe(entry.hash);
+        expect(journal.entries.some(candidate => `${candidate.tag}.sql` === entry.file)).toBe(true);
       }
       if (baseline !== "fresh") await replayHistoricalSchema(sql, [...common, ...(baseline === "master0346" ? mergedMasterTail : mergedMuseTail)]);
       const beforeHistory = baseline === "fresh" ? [] : await historyRows(sql);
@@ -288,8 +296,8 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
       const beforeRows = await retainedRows?.();
       const state = await inspectMigrations(connectionString);
       expect(state.status).toBe("needsMigrations");
-      const expectedPending = baseline === "master0346" ? mergedMuseTail.map(entry => entry.file)
-        : baseline === "muse0348" ? mergedMasterTail.map(entry => entry.file)
+      const expectedPending = baseline === "master0346" ? [...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file)
+        : baseline === "muse0348" ? [...mergedMasterTail, ...canonicalMasterTail, ...mergedMuseTail].map(entry => entry.file)
         : journal.entries.map(entry => `${entry.tag}.sql`);
       expect(state).toMatchObject({ pendingMigrations: expectedPending });
       if (baseline === "muse0348") {
@@ -302,9 +310,14 @@ describeEmbeddedPostgres("merged Muse migration histories", () => {
       await applyPendingMigrations(connectionString);
       expect((await inspectMigrations(connectionString)).status).toBe("upToDate");
       const afterHistory = await historyRows(sql);
-      expect(afterHistory).toHaveLength(journal.entries.length);
+      expect(afterHistory).toHaveLength(journal.entries.length + (baseline === "muse0348" ? mergedMuseTail.length : 0));
       expect(afterHistory.slice(0, beforeHistory.length)).toEqual(beforeHistory);
-      for (const entry of [...mergedMasterTail, ...mergedMuseTail]) expect(afterHistory.filter(row => row.hash === entry.hash)).toHaveLength(1);
+      for (const entry of [...mergedMasterTail, ...canonicalMasterTail]) expect(afterHistory.filter(row => row.hash === entry.hash)).toHaveLength(1);
+      for (const entry of mergedMuseTail) {
+        expect(afterHistory.filter(row => row.hash === entry.hash)).toHaveLength(baseline === "muse0348" ? 1 : 0);
+        const currentHash = await migrationHash(entry.file);
+        expect(afterHistory.filter(row => row.hash === currentHash)).toHaveLength(1);
+      }
       if (retainedRows) expect(await retainedRows()).toEqual(beforeRows);
       const indexes = await sql`
         SELECT c.relname, i.indisvalid, i.indisready, pg_get_indexdef(c.oid) AS definition

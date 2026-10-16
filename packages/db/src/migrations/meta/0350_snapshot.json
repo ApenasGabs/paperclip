@@ -1,6 +1,6 @@
 {
-  "id": "ae1e19c3-c183-47f8-a4ee-cb4aa4322e5a",
-  "prevId": "85333ce5-9fbe-4f14-926b-483e96acd1bf",
+  "id": "4839b071-2dd1-4d71-ba1a-19b040d8d33f",
+  "prevId": "cbf5e62c-5703-41fb-ac18-2df56eefc951",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -47161,11 +47161,11 @@
       "checkConstraints": {
         "resource_lifecycle_events_resource_type_check": {
           "name": "resource_lifecycle_events_resource_type_check",
-          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project')"
+          "value": "\"resource_lifecycle_events\".\"resource_type\" IN ('agent', 'project', 'agent_runtime')"
         },
         "resource_lifecycle_events_action_check": {
           "name": "resource_lifecycle_events_action_check",
-          "value": "\"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
+          "value": "(\"resource_lifecycle_events\".\"resource_type\" = 'agent_runtime' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'delete')) OR \"resource_lifecycle_events\".\"action\" = 'create' OR (\"resource_lifecycle_events\".\"resource_type\" = 'project' AND \"resource_lifecycle_events\".\"action\" IN ('update', 'archive', 'delete')) OR (\"resource_lifecycle_events\".\"resource_type\" = 'agent' AND \"resource_lifecycle_events\".\"action\" IN ('pause', 'resume', 'terminate'))"
         }
       },
       "isRLSEnabled": false
@@ -60962,12 +60962,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "detector_removal_requested_at": {
-          "name": "detector_removal_requested_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
         "detector_removed_at": {
           "name": "detector_removed_at",
           "type": "timestamp with time zone",
@@ -61521,19 +61515,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "signal_attempt": {
-          "name": "signal_attempt",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "signal_notified_at": {
-          "name": "signal_notified_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
         },
         "source_event_id": {
           "name": "source_event_id",
@@ -62104,12 +62085,6 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
-        },
-        "continuation_receipt_id": {
-          "name": "continuation_receipt_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
         },
         "digest": {
           "name": "digest",
