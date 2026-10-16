@@ -379,8 +379,9 @@ describe("sandbox callback bridge", () => {
     });
     expect(feedbackResponse.status).toBe(200);
     await feedbackResponse.arrayBuffer();
-    expect(seenRequests[2]).toMatchObject({ method: "POST", path: "/api/companies/company-1/agent-commentary", body: feedbackBody });
-    expect(seenRequests[2]?.headers.authorization).toBeUndefined();
+    expect(seenRequests).toHaveLength(4);
+    expect(seenRequests[3]).toMatchObject({ method: "POST", path: "/api/companies/company-1/agent-commentary", body: feedbackBody });
+    expect(seenRequests[3]?.headers.authorization).toBeUndefined();
 
   });
 

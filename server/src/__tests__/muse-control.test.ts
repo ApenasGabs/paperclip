@@ -1327,6 +1327,103 @@ describe("personal Muse control plane",()=>{
     await expect(f.identity.authenticate(f.credentials.accessToken)).rejects.toThrow("deadline");
     const [ended]=await db.select().from(bindings).where(eq(bindings.id,f.binding.id));expect(ended.revokedAt).toBeInstanceOf(Date);expect(ended.deadlineEnforcedAt).toBeInstanceOf(Date);
   });
+  it("reads actual raw assignment timestamps as strings and schema timestamps as Dates",async()=>{
+    const f=await active(await oauthFixture(true));
+    try {
+      const [raw]=await db.execute<{acceptBy:unknown;expiresAt:unknown;createdAt:unknown}>(sql`select accept_by as "acceptBy",expires_at as "expiresAt",created_at as "createdAt" from muse_runner_assignments where id=${f.assignment.id}::uuid`);
+      const [mapped]=await db.select().from(assignments).where(eq(assignments.id,f.assignment.id));
+      for(const key of ["acceptBy","expiresAt","createdAt"] as const){
+        expect(typeof raw[key]).toBe("string");expect(mapped[key]).toBeInstanceOf(Date);
+        expect(Date.parse(String(raw[key]))).toBe(mapped[key].getTime());
+      }
+    }finally{await f.detach();}
+  });
+  it.each(["accept_by","expires_at","nonfinite_accept_by","nonfinite_expires_at","unchanged"] as const)("rechecks actual assignment deadlines after a proven claim admission wait (%s)",async deadline=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    let release=()=>{},holder:Promise<void>|undefined,claim:Promise<{result?:unknown;error?:unknown}>|undefined;
+    try {
+      expect(f.assignment.acceptBy.getTime()).toBeGreaterThan(Date.now());expect(f.assignment.expiresAt.getTime()).toBeGreaterThan(Date.now());
+      const requestId=randomUUID(),beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      expect(beforeHolds).toEqual([]);
+      let ready=()=>{},holderPid=0;const locked=new Promise<void>(resolve=>{ready=resolve;}),gate=new Promise<void>(resolve=>{release=resolve;});
+      holder=db.transaction(async tx=>{
+        holderPid=(await tx.execute<{pid:number}>(sql`select pg_backend_pid() as pid`))[0].pid;
+        await tx.select({id:issues.id}).from(issues).where(and(eq(issues.companyId,f.company.id),eq(issues.id,f.issue.id))).for("update");ready();await gate;
+      });
+      await locked;
+      claim=f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId}).then(result=>({result}),error=>({error}));
+      await expect.poll(async()=>{
+        const [observed]=await db.execute<{waiting:boolean}>(sql`select exists(select 1 from pg_stat_activity waiter
+          inner join pg_locks waiting on waiting.pid=waiter.pid and waiting.locktype='transactionid' and not waiting.granted
+          inner join pg_locks held on held.pid=${holderPid} and held.locktype='transactionid' and held.granted and held.transactionid=waiting.transactionid
+          where waiter.datname=current_database() and ${holderPid}=any(pg_blocking_pids(waiter.pid))
+            and exists(select 1 from pg_locks tuple_lock where tuple_lock.pid=waiter.pid and tuple_lock.locktype='tuple'
+              and tuple_lock.relation='issues'::regclass and tuple_lock.mode='AccessExclusiveLock' and tuple_lock.granted)) as waiting`);
+        return observed.waiting;
+      },{timeout:5000,interval:25}).toBe(true);
+      if(deadline==="accept_by")await db.update(assignments).set({acceptBy:new Date(Date.now()-1)}).where(eq(assignments.id,f.assignment.id));
+      if(deadline==="expires_at")await db.update(assignments).set({expiresAt:new Date(Date.now()-1)}).where(eq(assignments.id,f.assignment.id));
+      if(deadline==="nonfinite_accept_by")await db.execute(sql`update muse_runner_assignments set accept_by='infinity'::timestamptz where id=${f.assignment.id}::uuid`);
+      if(deadline==="nonfinite_expires_at")await db.execute(sql`update muse_runner_assignments set expires_at='infinity'::timestamptz where id=${f.assignment.id}::uuid`);
+      release();await holder;
+      const outcome=await claim;
+      const [current]=await db.select().from(assignments).where(eq(assignments.id,f.assignment.id));
+      const receipts=await db.select().from(operations).where(eq(operations.assignmentId,f.assignment.id));
+      if(deadline==="unchanged"){
+        expect(outcome.error).toBeUndefined();expect(outcome.result).toMatchObject({status:"accepted"});
+        expect(current.status).toBe("accepted");expect(current.claimedAt).toBeInstanceOf(Date);expect(current.nativeAcceptedAt).toBeInstanceOf(Date);
+        expect(receipts).toHaveLength(1);expect(receipts[0]).toMatchObject({requestId,status:"settled",outcome:{status:"accepted"}});
+        const holds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+        expect(holds).toHaveLength(1);expect(holds[0]).toMatchObject({workerUnknown:true,nativeEffectsUnknown:false,releasedAt:null});
+        expect(await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId})).toEqual(outcome.result);
+        expect(await db.select().from(operations).where(eq(operations.assignmentId,f.assignment.id))).toEqual(receipts);
+        expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(holds);expect(f.sent).toHaveLength(1);
+      }else{
+        expect(outcome.error).toMatchObject({status:409});expect(outcome.result).toBeUndefined();
+        expect(current).toMatchObject({status:"offered",claimedAt:null,nativeAcceptedAt:null,acceptedResultAt:null,finalizedAt:null});
+        expect(receipts).toEqual([]);expect(f.sent).toEqual([]);
+        expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      }
+    }finally{release();await Promise.allSettled([holder,claim]);await f.detach();}
+  });
+  it.each(["expired","unchanged"] as const)("checks actual assignment expiry before forwarding a recovered reserved receipt (%s)",async deadline=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    const send=vi.fn(async(_command:ExternalProviderOperation)=>{});
+    let transaction:ReturnType<typeof vi.spyOn>|undefined,detach:(()=>Promise<void>)|undefined,failure:unknown,requestId=randomUUID();
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");await f.detach();
+      const input={text:"Recovered progress"},command={requestId,bindingId:f.binding.id,bindingGeneration:f.binding.generation,runId:f.runId,normalizedSessionId:f.assignment.normalizedSessionId,turnId:f.assignment.turnId,assignmentRevision:f.assignment.revision,action:"progress",input,digest:externalOperationDigest("progress",input)};
+      const [reserved]=await db.insert(operations).values({companyId:f.company.id,assignmentId:f.assignment.id,requestId,digest:command.digest,command,status:"reserved"}).returning();
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      if(deadline==="expired")await db.update(assignments).set({expiresAt:new Date(Date.now()-1)}).where(eq(assignments.id,f.assignment.id));
+      transaction=vi.spyOn(db,"transaction");
+      detach=await f.port.attach(send,undefined,true);
+      await expect.poll(()=>transaction!.mock.results.length,{timeout:5000,interval:25}).toBeGreaterThanOrEqual(2);
+      expect(transaction.mock.results[1].type).toBe("return");await transaction.mock.results[1].value;
+      if(deadline==="expired"){
+        expect(send).not.toHaveBeenCalled();
+        expect((await db.select().from(operations).where(eq(operations.id,reserved.id)))[0]).toEqual(reserved);
+        expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      }else{
+        await expect.poll(async()=>(await db.select().from(operations).where(eq(operations.id,reserved.id)))[0].status,{timeout:5000,interval:25}).toBe("pending");
+        expect(send).toHaveBeenCalledTimes(1);expect(send.mock.calls[0][0]).toEqual(command);
+        await f.port.settle({sourceEventId:randomUUID(),payload:{binding:f.ref,requestId,outcome:{status:"completed"}}});
+        expect(await f.broker.act(f.subject,{version:1,command:"progress",assignmentId:f.assignment.id,requestId,text:input.text})).toEqual({status:"completed"});
+        expect(send).toHaveBeenCalledTimes(1);
+        const receipts=await db.select().from(operations).where(eq(operations.requestId,requestId));expect(receipts).toHaveLength(1);expect(receipts[0]).toMatchObject({id:reserved.id,status:"settled",outcome:{status:"completed"}});
+        expect((await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id)))[0]).toMatchObject({workerUnknown:true,nativeEffectsUnknown:false,releasedAt:null});
+      }
+    }catch(error){failure=error;}
+    finally{
+      try {
+        if(send.mock.calls.length)await expect.poll(async()=>["pending","settled"].includes((await db.select().from(operations).where(eq(operations.requestId,requestId)))[0]?.status??""),{timeout:5000,interval:25}).toBe(true);
+      }catch(error){if(failure)console.error("MUSE_ASSIGNMENT_FORWARD_CLEANUP_ACK_FAILED");else failure=error;}
+      await detach?.();transaction?.mockRestore();await f.detach();
+    }
+    if(failure)throw failure;
+  });
   it("rejects a claim when reassignment commits while its exact issue lock is held",async()=>{
     const f=await active();let unlock!:()=>void,held!:()=>void,holderPid!:number;
     const gate=new Promise<void>(resolve=>{unlock=resolve;}),locked=new Promise<void>(resolve=>{held=resolve;});
