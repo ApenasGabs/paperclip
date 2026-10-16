@@ -34,7 +34,9 @@ import { LOW_TRUST_QUARANTINED_BODY, buildLowTrustSourceTrust, buildPromotedSour
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
 import { documentService } from "../services/documents.js";
 import { assertNoExternalOverlap, withExternalAdmissionGuard } from "../modules/external-agents/index.js";
-import { digestPaperclipSemanticContent, externalOperationDigest, type ExternalProviderOperation } from "../vendor/paperclip-runner/index.js";
+import { digestPaperclipSemanticContent, externalOperationDigest, parseNativeExecutionInput, canonicalNativeRuntimeContextDigest, nativeRuntimePromptDigest, NATIVE_RUNTIME_ASSET_SCHEMA, PAPERCLIP_EXECUTION_PROMPT, PAPERCLIP_EXECUTION_PROMPT_REVISION, type ExternalProviderOperation } from "../vendor/paperclip-runner/index.js";
+import { actorMiddleware } from "../middleware/auth.js";
+import { createLocalAgentJwt } from "../agent-auth-jwt.js";
 
 /** Real database/transport authority tests; synthetic provider receipts do not
  * count as live Muse/native qualification evidence. */
@@ -89,6 +91,72 @@ describe("personal Muse control plane",()=>{
     const [assignment]=await db.select().from(assignments).where(eq(assignments.runId,runId));
     return {...f,runId,issue,port,ref,assignment,sent,detach};
   }
+  it("authenticates current Muse V8 JWT actors and denies changed native bindings and grants",async()=>{
+    const f=await active(await oauthFixture(true)),previousSecret=process.env.PAPERCLIP_AGENT_JWT_SECRET;
+    process.env.PAPERCLIP_AGENT_JWT_SECRET=randomBytes(32).toString("hex");
+    try {
+      await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      // Strict launch data for an authentication fixture; no provider launch,
+      // scheduler admission, or runtime-asset qualification is claimed here.
+      const digest="0".repeat(64),now=Date.now();
+      const context={
+        prompt:{revision:PAPERCLIP_EXECUTION_PROMPT_REVISION,text:PAPERCLIP_EXECUTION_PROMPT,digest:nativeRuntimePromptDigest()},
+        instructions:{entryPath:"AGENTS.md",bundle:{schema:NATIVE_RUNTIME_ASSET_SCHEMA,digest,manifestDigest:digest,rootPath:"/synthetic/muse-jwt-instructions",fileCount:1,totalBytes:4}},
+        skills:[],mcp:{assignmentSetId:"none",digest,bindingId:null},
+      };
+      const execution=parseNativeExecutionInput({
+        schema:"paperclip.native-execution-input.v8",
+        binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId,issueId:f.issue.id,executionWorkspaceId:randomUUID()},
+        task:{identifier:f.issue.identifier??"MUSE-JWT",title:f.issue.title,description:null,prompt:"Read the current actor.",workMode:"standard"},
+        provider:{kind:"muse",model:null,bridgeRevision:"muse-v1",binding:{companyId:f.company.id,agentId:f.agent.id,bindingId:f.binding.id,bindingGeneration:f.binding.generation,acceptByUnixMs:now+600000,expiresAtUnixMs:now+3600000}},
+        workspace:{access:"none",cwd:null,repoUrl:null,repoRef:null,branchName:null},
+        session:{normalizedSessionId:f.ref.normalizedSessionId,driverKind:"muse_external",protocolVersion:1,lifecyclePolicy:{mode:"per_turn",idleTimeoutMs:null}},
+        executionMode:"default",planningContext:null,
+        completionContract:{id:randomUUID(),sha256:"sha256:"+digest,schemaVersion:"paperclip.completion-contract.v1",contract:{revision:"1",objective:"Read the actor",criteria:[{id:"actor",requirement:"Read the actor"}]}},
+        runtimeContext:{...context,aggregateDigest:canonicalNativeRuntimeContextDigest(context)},interactionResponses:[],credentialBindings:[],
+      });
+      if(execution.schema!=="paperclip.native-execution-input.v8")throw new Error("Muse JWT fixture is not V8");
+      const profile={nativeExecutionInput:execution};
+      await db.update(heartbeatRuns).set({runnerProfileJson:profile}).where(eq(heartbeatRuns.id,f.runId));
+      await expect(f.broker.assertRunAuthority(execution)).resolves.toBeUndefined();
+      const token=createLocalAgentJwt(f.agent.id,f.company.id,"paperclip_runner",f.runId,f.operatorId,undefined,f.operatorId);
+      expect(typeof token).toBe("string");
+      const app=express();app.use(actorMiddleware(db,{deploymentMode:"authenticated",resolveSession:async()=>null}));
+      app.get("/actor",(req,res)=>res.json(req.actor));app.use(errorHandler);
+      const read=()=>request(app).get("/actor").set("Authorization","Bearer "+token).set("X-Paperclip-Run-Id",f.runId);
+      const positive=await read();
+      expect(positive.status).toBe(200);expect(positive.body).toMatchObject({type:"agent",source:"agent_jwt",companyId:f.company.id,agentId:f.agent.id,runId:f.runId,authorizingUserId:f.operatorId,onBehalfOfUserId:f.operatorId});
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      const beforeAssignment=(await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0];
+      const beforeActivity=await db.select().from(activityLog).where(eq(activityLog.companyId,f.company.id)).orderBy(activityLog.id);
+      await db.update(heartbeatRuns).set({runtimeMode:"legacy"}).where(eq(heartbeatRuns.id,f.runId));
+      const nonNative=await read();expect(nonNative.status).toBe(403);expect(nonNative.body).toEqual({error:"Muse native tool authority is unavailable"});
+      await db.update(heartbeatRuns).set({runtimeMode:"native"}).where(eq(heartbeatRuns.id,f.runId));
+      expect((await read()).status).toBe(200);
+      // This remains a valid V8 shape, but names a different current run.
+      const otherRun={...execution,binding:{...execution.binding,runId:randomUUID()}};
+      expect(parseNativeExecutionInput(otherRun).schema).toBe("paperclip.native-execution-input.v8");
+      await db.update(heartbeatRuns).set({runnerProfileJson:{nativeExecutionInput:otherRun}}).where(eq(heartbeatRuns.id,f.runId));
+      const wrongRun=await read();expect(wrongRun.status).toBe(403);expect(wrongRun.body).toEqual({error:"Muse native tool authority is unavailable"});
+      await db.update(heartbeatRuns).set({runnerProfileJson:profile}).where(eq(heartbeatRuns.id,f.runId));
+      expect((await read()).status).toBe(200);
+      const otherAuthorizer=createLocalAgentJwt(f.agent.id,f.company.id,"paperclip_runner",f.runId,f.operatorId,undefined,randomUUID());
+      expect(typeof otherAuthorizer).toBe("string");
+      const wrongAuthorizer=await request(app).get("/actor").set("Authorization","Bearer "+otherAuthorizer).set("X-Paperclip-Run-Id",f.runId);
+      expect(wrongAuthorizer.status).toBe(403);expect(wrongAuthorizer.body).toEqual({error:"Muse native tool authority is unavailable"});
+      // A synthetic current-DB grant revocation must affect the same signed JWT.
+      await db.update(mcpOauthGrants).set({revokedAt:new Date()}).where(eq(mcpOauthGrants.id,f.binding.grantId!));
+      const revoked=await read();expect(revoked.status).toBe(403);expect(revoked.body).toEqual({error:"Muse native tool authority is unavailable"});
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select().from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual(beforeAssignment);
+      expect(await db.select().from(activityLog).where(eq(activityLog.companyId,f.company.id)).orderBy(activityLog.id)).toEqual(beforeActivity);
+      expect((await db.select({status:heartbeatRuns.status,runtimeMode:heartbeatRuns.runtimeMode,runnerProfileJson:heartbeatRuns.runnerProfileJson,resultJson:heartbeatRuns.resultJson}).from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)))[0]).toMatchObject({status:"running",runtimeMode:"native",runnerProfileJson:profile,resultJson:null});
+    }finally{
+      if(previousSecret===undefined)delete process.env.PAPERCLIP_AGENT_JWT_SECRET;else process.env.PAPERCLIP_AGENT_JWT_SECRET=previousSecret;
+      await f.detach();
+    }
+  });
   it.each([true,false])("retains native Muse progress source trust and idempotent history (low trust: %s)",async lowTrust=>{
     const f=await active(await oauthFixture(true));
     await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
