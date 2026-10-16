@@ -89,6 +89,77 @@ describe("personal Muse control plane",()=>{
     const [assignment]=await db.select().from(assignments).where(eq(assignments.runId,runId));
     return {...f,runId,issue,port,ref,assignment,sent,detach};
   }
+  it.each([true,false])("retains native Muse progress source trust and idempotent history (low trust: %s)",async lowTrust=>{
+    const f=await active(await oauthFixture(true));
+    await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});
+    try {
+      expect((await f.broker.act(f.subject,{version:1,command:"accept",assignmentId:f.assignment.id,requestId:randomUUID()})).status).toBe("accepted");
+      const executionPolicy={authorizationPolicy:{trustBoundary:{mode:"low_trust_review",companyId:f.company.id,rootIssueId:f.issue.id}}};
+      const writerContext={issueId:f.issue.id,...(lowTrust?{executionPolicy}:{})};
+      await db.update(heartbeatRuns).set({contextSnapshot:writerContext}).where(eq(heartbeatRuns.id,f.runId));
+      const execution={binding:{companyId:f.company.id,agentId:f.agent.id,runId:f.runId},provider:{binding:f.ref}};
+      const checks:string[]=[],authority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:f.agent.id,issueId:f.issue.id,runId:f.runId,
+        museRuntime:true,externalAuthorizingUserId:f.operatorId,assertBridgeAuthority:async(database=db)=>{
+          await f.broker.assertRunAuthority(execution,database);checks.push(database===db?"discovery":"transaction");
+        }});
+      const body="NATIVE_MUSE_PROGRESS_QUARANTINE_CANARY",idempotencyKey=randomUUID();
+      const call={tool:"report_progress",callId:randomUUID(),arguments:{body,idempotencyKey}};
+      const beforeHolds=await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id));
+      const first=await authority.execute(call) as {commentId:string,issueId:string,disposition:string};
+      expect(first).toMatchObject({issueId:f.issue.id,disposition:"applied"});
+      expect(checks).toEqual(["discovery","transaction"]);
+      const [comment]=await db.select().from(issueComments).where(eq(issueComments.id,first.commentId));
+      const expectedTrust=lowTrust?buildLowTrustSourceTrust({issueId:f.issue.id,agentId:f.agent.id,runId:f.runId}):null;
+      // The baseline must reach the actual persisted tag; the previous producer stores null.
+      expect(comment.sourceTrust).toEqual(expectedTrust);
+      expect(comment).toMatchObject({companyId:f.company.id,issueId:f.issue.id,authorAgentId:f.agent.id,createdByRunId:f.runId,body});
+      const snapshot=async()=>({
+        comments:await db.select().from(issueComments).where(eq(issueComments.issueId,f.issue.id)).orderBy(issueComments.id),
+        activity:await db.select().from(activityLog).where(eq(activityLog.companyId,f.company.id)).orderBy(activityLog.id),
+        run:(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)))[0],
+      });
+      const committed=await snapshot();
+      expect(committed.comments).toHaveLength(1);
+      expect(committed.activity.filter(row=>row.action==="issue.comment_added")).toHaveLength(1);
+      expect((committed.run.resultJson as {semanticToolReceipts:Record<string,unknown>}).semanticToolReceipts).toEqual({
+        [idempotencyKey]:{operationId:"report_progress",input:call.arguments,result:first},
+      });
+      expect(await authority.execute({...call,callId:randomUUID()})).toEqual(first);
+      expect(await snapshot()).toEqual(committed);
+      await expect(authority.execute({...call,callId:randomUUID(),arguments:{...call.arguments,body:body+" changed"}})).rejects.toThrow("paperclip_runner_tool_idempotency_conflict");
+      expect(await snapshot()).toEqual(committed);
+      const history=await authority.execute({tool:"get_task_history",callId:randomUUID(),arguments:{limit:50}}) as {comments:Array<{id:string,body:string,sourceTrust:unknown}>};
+      expect(history.comments).toHaveLength(1);
+      expect(history.comments[0]).toMatchObject({id:comment.id,body,sourceTrust:expectedTrust});
+      if(lowTrust){
+        const promotedId=randomUUID(),standardId=randomUUID(),at=comment.createdAt.getTime();
+        const promotedTrust=buildPromotedSourceTrust({sourceIssueId:f.issue.id,sourceArtifactKind:"comment",sourceArtifactId:comment.id,promotedByActorType:"user",promotedByActorId:f.operatorId});
+        await db.insert(issueComments).values([
+          {id:promotedId,companyId:f.company.id,issueId:f.issue.id,authorUserId:f.operatorId,authorType:"user",body:"Reviewed progress summary",sourceTrust:promotedTrust,createdAt:new Date(at+1000)},
+          {id:standardId,companyId:f.company.id,issueId:f.issue.id,authorUserId:f.operatorId,authorType:"user",body:"Ordinary coordination",createdAt:new Date(at+2000)},
+        ]);
+        // Construct a distinct, genuinely standard read context. This is a DB
+        // read fixture, not scheduler admission, a handoff, or worker release.
+        const [reader]=await db.insert(agents).values({companyId:f.company.id,name:"Standard history reader",role:"engineer",status:"active",adapterType:"paperclip_runner",adapterConfig:{provider:"codex"}}).returning();
+        await db.insert(companyMemberships).values({companyId:f.company.id,principalType:"agent",principalId:reader.id,membershipRole:"member",status:"active"});
+        const readerRunId=randomUUID();
+        await db.insert(heartbeatRuns).values({id:readerRunId,companyId:f.company.id,agentId:reader.id,status:"running",runtimeMode:"native",nativeIssueId:f.issue.id,responsibleUserId:f.operatorId,contextSnapshot:{issueId:f.issue.id}});
+        await db.update(issues).set({assigneeAgentId:reader.id,executionRunId:readerRunId,checkoutRunId:readerRunId}).where(eq(issues.id,f.issue.id));
+        const readerAuthority=new PaperclipRunnerToolAuthority(db,{companyId:f.company.id,agentId:reader.id,issueId:f.issue.id,runId:readerRunId});
+        const stored=await db.select().from(issueComments).where(eq(issueComments.issueId,f.issue.id)).orderBy(issueComments.id);
+        const read=await readerAuthority.execute({tool:"get_task_history",callId:randomUUID(),arguments:{limit:50}}) as {comments:Array<{id:string,body:string,sourceTrust:unknown}>};
+        expect(read.comments.find(row=>row.id===comment.id)).toMatchObject({body:LOW_TRUST_QUARANTINED_BODY,sourceTrust:expectedTrust});
+        expect(JSON.stringify(read)).not.toContain(body);
+        expect(read.comments.find(row=>row.id===promotedId)).toMatchObject({body:"Reviewed progress summary",sourceTrust:promotedTrust});
+        expect(read.comments.find(row=>row.id===standardId)).toMatchObject({body:"Ordinary coordination",sourceTrust:null});
+        expect(await db.select().from(issueComments).where(eq(issueComments.issueId,f.issue.id)).orderBy(issueComments.id)).toEqual(stored);
+      }
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id,f.runId)))[0]).toEqual(committed.run);
+      expect(committed.run.contextSnapshot).toEqual(writerContext);
+      expect(await db.select().from(externalAgentHolds).where(eq(externalAgentHolds.assignmentId,f.assignment.id))).toEqual(beforeHolds);
+      expect((await db.select({status:assignments.status,acceptedResultAt:assignments.acceptedResultAt,finalizedAt:assignments.finalizedAt}).from(assignments).where(eq(assignments.id,f.assignment.id)))[0]).toEqual({status:"accepted",acceptedResultAt:null,finalizedAt:null});
+    }finally{await f.detach();}
+  });
   it.each(["refresh_expired","muse_disabled","runner_disabled","grant_revoked","binding_revoked","assignment_fenced","qualification_expired","unchanged"] as const)("rechecks native Muse document authority after the real task-lock wait (%s)",async fault=>{
     const f=await active(await oauthFixture(true));
     await ensureHumanRoleDefaultGrants(db,{companyId:f.company.id,principalId:f.operatorId,membershipRole:"owner",grantedByUserId:f.operatorId});

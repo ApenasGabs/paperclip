@@ -1177,11 +1177,13 @@ export class PaperclipRunnerToolAuthority {
       idempotencyKey,
       input,
       async (tx, context) => {
+        const sourceTrust = this.binding.museRuntime ? await resolveActorSourceTrustForIssue({ db: tx, issue: context.issue,
+          actor: { actorType: "agent", actorId: this.binding.agentId, agentId: this.binding.agentId, runId: this.binding.runId } }) : undefined;
         const comment = await issueService(tx).addComment(
           this.binding.issueId,
           body,
           { agentId: this.binding.agentId, runId: this.binding.runId },
-          { authorizationReason: "paperclip_runner_protocol" },
+          { authorizationReason: "paperclip_runner_protocol", sourceTrust },
           tx,
         );
         const result = { commentId: comment.id, issueId: this.binding.issueId, disposition: "applied" };
