@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   activityLog,
@@ -22,6 +22,7 @@ import {
 } from "../services/issue-prefix.js";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 import { agentRunWritesRevoked } from "../agent-run-cancellation.js";
+import { loadAgentRunAuthentication } from "./agent-run-authentication.js";
 import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@paperclipai/shared";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
@@ -411,12 +412,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         return;
       }
 
-      const [identityRun] = await db.select({ activeIdentityContextId: heartbeatRuns.activeIdentityContextId,
-        responsibleUserId: heartbeatRuns.responsibleUserId, status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson,
-        contextSnapshot: heartbeatRuns.contextSnapshot, runtimeMode: heartbeatRuns.runtimeMode,
-        runnerProfileJson: heartbeatRuns.runnerProfileJson }).from(heartbeatRuns).where(and(
-          eq(heartbeatRuns.id, claims.run_id), eq(heartbeatRuns.companyId, claims.company_id), eq(heartbeatRuns.agentId, claims.sub),
-        ));
+      const [identityRun] = await loadAgentRunAuthentication(db, {
+        runId: claims.run_id,
+        companyId: claims.company_id,
+        agentId: claims.sub,
+      });
       if (agentRunWritesRevoked(identityRun)
         && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
         const conversation = identityRun?.contextSnapshot?.conversationMode === true;
@@ -435,8 +435,13 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         try {
           const { parseNativeExecutionInput } = await import("../vendor/paperclip-runner/index.js");
           const { museRunnerBroker } = await import("../services/muse-runner-broker.js");
-          const execution = parseNativeExecutionInput(identityRun?.runnerProfileJson?.nativeExecutionInput);
-          if (identityRun?.status !== "running" || identityRun.runtimeMode !== "native" || execution.schema !== "paperclip.native-execution-input.v8"
+          const [nativeRun] = await db.select({ status: heartbeatRuns.status, runtimeMode: heartbeatRuns.runtimeMode,
+            nativeExecutionInput: sql<unknown>`${heartbeatRuns.runnerProfileJson}->'nativeExecutionInput'`,
+          }).from(heartbeatRuns).where(and(
+            eq(heartbeatRuns.id, claims.run_id), eq(heartbeatRuns.companyId, claims.company_id), eq(heartbeatRuns.agentId, claims.sub),
+          ));
+          const execution = parseNativeExecutionInput(nativeRun?.nativeExecutionInput);
+          if (nativeRun?.status !== "running" || nativeRun.runtimeMode !== "native" || execution.schema !== "paperclip.native-execution-input.v8"
             || execution.binding.runId !== claims.run_id || execution.binding.agentId !== claims.sub || execution.binding.companyId !== claims.company_id
             || await museRunnerBroker(db).authorizingUserIdForBinding(execution.provider.binding) !== claims.authorizing_user_id) {
             throw new Error("Muse internal tool authority mismatch");
