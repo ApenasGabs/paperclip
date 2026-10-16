@@ -41,3 +41,7 @@ Scope: focused sweep of test-support files under `packages/paperclip-runner/test
 
 Model: Zhipu `z-ai/glm-5.3` via OpenRouter (Test Gardener (GLM)); context window unavailable;
 shell tooling and git/GitHub search only.
+
+Delivery: PR #16543 (deletion-only; retitled to the `refactor(runner):` prefix because
+the repository quality gate requires a test file or a `refactor:` title for test-file-less
+PRs — no registered case exists for the removed fixtures).
