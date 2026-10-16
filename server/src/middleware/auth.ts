@@ -436,7 +436,7 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           const { parseNativeExecutionInput } = await import("../vendor/paperclip-runner/index.js");
           const { museRunnerBroker } = await import("../services/muse-runner-broker.js");
           const execution = parseNativeExecutionInput(identityRun?.runnerProfileJson?.nativeExecutionInput);
-          if (identityRun?.status !== "running" || identityRun.runtimeMode !== "native" || execution.schema !== "paperclip.native-execution-input.v7"
+          if (identityRun?.status !== "running" || identityRun.runtimeMode !== "native" || execution.schema !== "paperclip.native-execution-input.v8"
             || execution.binding.runId !== claims.run_id || execution.binding.agentId !== claims.sub || execution.binding.companyId !== claims.company_id
             || await museRunnerBroker(db).authorizingUserIdForBinding(execution.provider.binding) !== claims.authorizing_user_id) {
             throw new Error("Muse internal tool authority mismatch");

@@ -19,10 +19,10 @@ export function nativeRuntimeHasInstructionFilesystem(backend: string): boolean 
 }
 
 type TaskWorkspaceExecution = Exclude<NativeExecutionInput, {
-  schema: "paperclip.native-execution-input.v6" | "paperclip.native-execution-input.v7";
+  schema: "paperclip.native-execution-input.v6" | "paperclip.native-execution-input.v8";
 }>;
 
 export function nativeExecutionUsesTaskWorkspace(execution: NativeExecutionInput | null): execution is TaskWorkspaceExecution {
   return execution !== null && execution.schema !== "paperclip.native-execution-input.v6"
-    && execution.schema !== "paperclip.native-execution-input.v7";
+    && execution.schema !== "paperclip.native-execution-input.v8";
 }
