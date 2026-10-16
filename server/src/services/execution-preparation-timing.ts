@@ -74,6 +74,7 @@ export type ExecutionPhase =
   | "execution.runtime" | "execution.workspace_ownership" | "execution.workspace_finalize" | "execution.workspace_restore" | "execution.workspace_commit"
   | "execution.workspace_ownership_wait" | "execution.realtime"
   | "execution.usage" | "execution.native_finalize"
+  | "execution.usage_startup" | "execution.mcp_handoff" | "execution.dispatch_admission" | "execution.budget_reservation"
   | "completion.run" | "completion.output" | "completion.terminal_write" | "completion.cost" | "completion.liveness" | "completion.summary"
   | "response.transaction" | "response.transaction.entry" | "response.transaction.commit" | "response.transaction.rollback" | "response.row_lock" | "response.write"
   | "response.resolve" | "response.authorize" | "response.add_comment" | "response.activity" | "response.publish";
