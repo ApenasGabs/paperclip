@@ -5,6 +5,7 @@ import { paperclipRunnerUIAdapter } from "./paperclip-runner";
 import { cursorCloudUIAdapter } from "./cursor-cloud";
 import { cursorLocalUIAdapter } from "./cursor";
 import { geminiLocalUIAdapter } from "./gemini-local";
+import { antigravityLocalUIAdapter } from "./antigravity-local";
 import { grokLocalUIAdapter } from "./grok-local";
 import { kimiLocalUIAdapter } from "./kimi-local";
 import { hermesGatewayUIAdapter } from "./hermes-gateway";
@@ -59,6 +60,7 @@ function registerBuiltInUIAdapters() {
     paperclipRunnerUIAdapter,
     cursorCloudUIAdapter,
     geminiLocalUIAdapter,
+    antigravityLocalUIAdapter,
     grokLocalUIAdapter,
     kimiLocalUIAdapter,
     hermesGatewayUIAdapter,
