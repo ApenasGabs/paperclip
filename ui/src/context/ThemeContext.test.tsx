@@ -3,7 +3,12 @@
 import { act } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { ThemeProvider, useTheme } from "./ThemeContext";
+import {
+  ThemeProvider,
+  useTheme,
+  DARK_THEME_COLOR,
+  LIGHT_THEME_COLOR,
+} from "./ThemeContext";
 
 const THEME_STORAGE_KEY = "paperclip.theme";
 
@@ -53,14 +58,18 @@ function installMatchMedia(initialMatches: boolean): FakeMediaQueryList {
 describe("ThemeContext", () => {
   let container: HTMLDivElement;
   let observedTheme: "light" | "dark" | null = null;
+  let observedThemeColor: string | null = null;
   let setTheme: ((theme: "light" | "dark") => void) | null = null;
   let toggleTheme: (() => void) | null = null;
+  let setThemeColor: ((color: string | null) => void) | null = null;
 
   function Probe() {
     const ctx = useTheme();
     observedTheme = ctx.theme;
+    observedThemeColor = ctx.themeColor;
     setTheme = ctx.setTheme;
     toggleTheme = ctx.toggleTheme;
+    setThemeColor = ctx.setThemeColor;
     return null;
   }
 
@@ -171,6 +180,42 @@ describe("ThemeContext", () => {
       mql.dispatch(true);
     });
     expect(observedTheme).not.toBe("dark");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("exposes themeColor matching active theme and supports custom override", () => {
+    document.documentElement.classList.add("dark");
+
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      );
+    });
+
+    expect(observedTheme).toBe("dark");
+    expect(observedThemeColor).toBe(DARK_THEME_COLOR);
+
+    act(() => {
+      setTheme?.("light");
+    });
+    expect(observedTheme).toBe("light");
+    expect(observedThemeColor).toBe(LIGHT_THEME_COLOR);
+
+    act(() => {
+      setThemeColor?.("rgb(1, 2, 3)");
+    });
+    expect(observedThemeColor).toBe("rgb(1, 2, 3)");
+
+    act(() => {
+      setThemeColor?.(null);
+    });
+    expect(observedThemeColor).toBe(LIGHT_THEME_COLOR);
 
     act(() => {
       root.unmount();
