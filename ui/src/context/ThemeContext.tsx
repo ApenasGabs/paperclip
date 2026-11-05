@@ -7,18 +7,22 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { HelmetProvider } from "react-helmet-async";
+import { AndroidStatusBar } from "../components/AndroidStatusBar";
 
-type Theme = "light" | "dark";
+export type Theme = "light" | "dark";
 
-interface ThemeContextValue {
+export interface ThemeContextValue {
   theme: Theme;
+  themeColor: string;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
+  setThemeColor: (color: string | null) => void;
 }
 
-const THEME_STORAGE_KEY = "paperclip.theme";
-const DARK_THEME_COLOR = "#18181b";
-const LIGHT_THEME_COLOR = "#ffffff";
+export const THEME_STORAGE_KEY = "paperclip.theme";
+export const DARK_THEME_COLOR = "#18181b";
+export const LIGHT_THEME_COLOR = "#ffffff";
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
 
 function resolveThemeFromDocument(): Theme {
@@ -42,18 +46,20 @@ function applyTheme(theme: Theme) {
   const root = document.documentElement;
   root.classList.toggle("dark", isDark);
   root.style.colorScheme = isDark ? "dark" : "light";
-  const themeColorMeta = document.querySelector('meta[name="theme-color"]');
-  if (themeColorMeta instanceof HTMLMetaElement) {
-    themeColorMeta.setAttribute("content", isDark ? DARK_THEME_COLOR : LIGHT_THEME_COLOR);
-  }
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(() => resolveThemeFromDocument());
+  const [customThemeColor, setCustomThemeColor] = useState<string | null>(null);
   // Track whether the user has explicitly chosen a theme. If false, the
   // theme is being derived from the OS `prefers-color-scheme` and should
   // follow OS-level changes mid-session without being persisted.
   const [hasExplicitChoice, setHasExplicitChoice] = useState<boolean>(() => hasStoredTheme());
+
+  const themeColor = useMemo(
+    () => customThemeColor ?? (theme === "dark" ? DARK_THEME_COLOR : LIGHT_THEME_COLOR),
+    [customThemeColor, theme],
+  );
 
   const setTheme = useCallback((nextTheme: Theme) => {
     setHasExplicitChoice(true);
@@ -63,6 +69,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const toggleTheme = useCallback(() => {
     setHasExplicitChoice(true);
     setThemeState((current) => (current === "dark" ? "light" : "dark"));
+  }, []);
+
+  const setThemeColor = useCallback((color: string | null) => {
+    setCustomThemeColor(color);
   }, []);
 
   useEffect(() => {
@@ -91,16 +101,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const value = useMemo(
     () => ({
       theme,
+      themeColor,
       setTheme,
       toggleTheme,
+      setThemeColor,
     }),
-    [theme, setTheme, toggleTheme],
+    [theme, themeColor, setTheme, toggleTheme, setThemeColor],
   );
 
   return (
-    <ThemeContext.Provider value={value}>
-      {children}
-    </ThemeContext.Provider>
+    <HelmetProvider>
+      <ThemeContext.Provider value={value}>
+        <AndroidStatusBar />
+        {children}
+      </ThemeContext.Provider>
+    </HelmetProvider>
   );
 }
 
