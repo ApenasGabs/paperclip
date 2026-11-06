@@ -58,8 +58,8 @@ export async function syncAntigravitySkills(
 ): Promise<AdapterSkillSnapshot> {
   const availableEntries = await readPaperclipRuntimeSkillEntries(ctx.config, __moduleDir);
   const desiredSet = new Set([
+    ...resolvePaperclipDesiredSkillNames(ctx.config, availableEntries),
     ...desiredSkills,
-    ...availableEntries.filter((entry) => entry.required).map((entry) => entry.key),
   ]);
   const skillsHome = resolveAntigravitySkillsHome(ctx.config);
   await fs.mkdir(skillsHome, { recursive: true });

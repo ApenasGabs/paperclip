@@ -1649,6 +1649,14 @@ async function startServerWithDatabaseTeardown(
           );
         }
 
+        const agentErrorsReconciled = await heartbeat.reconcileAgentsInError();
+        if (agentErrorsReconciled.recovered > 0) {
+          logger.warn(
+            { ...agentErrorsReconciled },
+            "startup agent error reconciliation restored agents to idle",
+          );
+        }
+
         const scanned = await heartbeat.scanSilentActiveRuns();
         if (scanned.created > 0 || scanned.escalated > 0) {
           logger.warn({ ...scanned }, "startup active-run output watchdog created review work");
@@ -1868,6 +1876,15 @@ async function startServerWithDatabaseTeardown(
               const swept = await heartbeat.sweepStaleIssueLocks();
               if (swept.cleared > 0) {
                 logger.warn({ ...swept }, "periodic stale-lock sweeper cleared issue locks");
+              }
+            })
+            .then(async () => {
+              const agentErrorsReconciled = await heartbeat.reconcileAgentsInError();
+              if (agentErrorsReconciled.recovered > 0) {
+                logger.warn(
+                  { ...agentErrorsReconciled },
+                  "periodic agent error reconciliation restored agents to idle",
+                );
               }
             })
             .catch((err) => {
