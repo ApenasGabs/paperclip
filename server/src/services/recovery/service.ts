@@ -1,4 +1,6 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { publishLiveEvent } from "../live-events.js";
+import { requireServerAdapter } from "../../adapters/index.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
@@ -28,6 +30,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  lte,
   not,
   notExists,
   notInArray,
@@ -472,8 +475,12 @@ function didAutomaticRecoveryFail(
     | "assignment_recovery"
     | "issue_continuation_needed"
     | typeof EXECUTION_REVIEW_PARTICIPANT_RECOVERY_REASON,
+  expectedAgentId?: string | null,
 ) {
   if (!latestRun) return false;
+  if (expectedAgentId && latestRun.agentId !== expectedAgentId) {
+    return false;
+  }
 
   const latestContext = parseObject(latestRun.contextSnapshot);
   const latestRetryReason = readNonEmptyString(latestContext.retryReason);
@@ -1027,6 +1034,7 @@ export function recoveryService(
     agentId: string,
     errorCodeToMatch: string | null,
     since: Date | null = null,
+    retryReasonToMatch: string = "issue_continuation_needed",
   ) {
     const rows = await db
       .select({
@@ -1060,7 +1068,7 @@ export function recoveryService(
     for (const row of rows) {
       const ctx = parseObject(row.contextSnapshot);
       const retryReason = readNonEmptyString(ctx.retryReason);
-      if (retryReason !== "issue_continuation_needed") break;
+      if (retryReason !== retryReasonToMatch) break;
       if (
         !UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES.includes(
           row.status as (typeof UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES)[number],
@@ -1070,7 +1078,7 @@ export function recoveryService(
       }
 
       const rowErrorCode = readNonEmptyString(row.errorCode);
-      if (errorCodeToMatch !== rowErrorCode) {
+      if (errorCodeToMatch !== null && errorCodeToMatch !== rowErrorCode) {
         break;
       }
 
@@ -5250,27 +5258,52 @@ export function recoveryService(
           continue;
         }
 
-        if (didAutomaticRecoveryFail(latestRun, "assignment_recovery")) {
-          const updated = await escalateStrandedAssignedIssue({
-            issue,
-            previousStatus: "todo",
-            latestRun,
-            notice: {
-              body:
-                "Paperclip automatically retried dispatch for this assigned `todo` issue after a lost wake/run, " +
-                "but it still has no live execution path. " +
-                "Moving it to `blocked` so it is visible for intervention.",
-              title: "No live execution path",
-              tone: "danger",
-            },
-          });
-          if (updated) {
-            result.escalated += 1;
-            result.issueIds.push(issue.id);
-          } else {
-            result.skipped += 1;
+        if (didAutomaticRecoveryFail(latestRun, "assignment_recovery", agentId)) {
+          const { consecutive, latestFinishedAt } =
+            await summarizeRecentContinuationRetries(
+              issue.companyId,
+              issue.id,
+              agentId,
+              null,
+              null,
+              "assignment_recovery",
+            );
+          const maxAssignmentRecoveryAttempts = 4;
+          if (consecutive >= maxAssignmentRecoveryAttempts) {
+            const attemptCopy =
+              consecutive <= 1 ? "" : ` (${consecutive}× attempts)`;
+            const updated = await escalateStrandedAssignedIssue({
+              issue,
+              previousStatus: "todo",
+              latestRun,
+              notice: {
+                body:
+                  "Paperclip automatically retried dispatch for this assigned `todo` issue after a lost wake/run, " +
+                  `but it still has no live execution path${attemptCopy}. ` +
+                  "Moving it to `blocked` so it is visible for intervention.",
+                title: "No live execution path",
+                tone: "danger",
+              },
+            });
+            if (updated) {
+              result.escalated += 1;
+              result.issueIds.push(issue.id);
+            } else {
+              result.skipped += 1;
+            }
+            continue;
           }
-          continue;
+
+          const baseBackoffMs = 15_000;
+          if (latestFinishedAt) {
+            const elapsed = Date.now() - latestFinishedAt.getTime();
+            const requiredDelay =
+              baseBackoffMs * Math.pow(2, Math.max(0, consecutive - 1));
+            if (elapsed < requiredDelay) {
+              result.skipped += 1;
+              continue;
+            }
+          }
         }
 
         if (await isInvocationBudgetBlocked(issue, agentId)) {
@@ -6363,6 +6396,118 @@ export function recoveryService(
     return result;
   }
 
+  async function reconcileAgentsInError(opts?: {
+    coolDownMs?: number;
+  }) {
+    const coolDownMs = opts?.coolDownMs ?? 5 * 60 * 1000;
+    const cutoff = new Date(Date.now() - coolDownMs);
+
+    const candidates = await db
+      .select()
+      .from(agents)
+      .where(
+        and(
+          eq(agents.status, "error"),
+          eq(agents.lifecycleState, "ready"),
+          or(isNull(agents.updatedAt), lte(agents.updatedAt, cutoff)),
+        ),
+      );
+
+    const result = {
+      recovered: 0,
+      stillFailing: 0,
+      agentIds: [] as string[],
+    };
+
+    for (const agent of candidates) {
+      try {
+        let healthy = false;
+        try {
+          const adapter = requireServerAdapter(agent.adapterType);
+          if (typeof adapter.testEnvironment === "function") {
+            const probeResult = await adapter.testEnvironment({
+              companyId: agent.companyId,
+              adapterType: agent.adapterType,
+              config: parseObject(agent.adapterConfig),
+            });
+            healthy = probeResult.status !== "fail";
+          } else {
+            healthy = true;
+          }
+        } catch {
+          healthy = false;
+        }
+
+        if (!healthy) {
+          result.stillFailing += 1;
+          continue;
+        }
+
+        const updated = await db
+          .update(agents)
+          .set({
+            status: "idle",
+            pauseReason: null,
+            pausedAt: null,
+            errorReason: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(agents.id, agent.id),
+              eq(agents.status, "error"),
+              eq(agents.lifecycleState, "ready"),
+            ),
+          )
+          .returning()
+          .then((rows) => rows[0] ?? null);
+
+        if (updated) {
+          result.recovered += 1;
+          result.agentIds.push(agent.id);
+
+          await logActivity(db, {
+            companyId: agent.companyId,
+            actorType: "system",
+            actorId: "system",
+            agentId: agent.id,
+            runId: null,
+            action: "agent.recovered_from_error",
+            entityType: "agent",
+            entityId: agent.id,
+            details: {
+              source: "recovery.reconcile_agents_in_error",
+              previousStatus: "error",
+              status: "idle",
+            },
+          });
+
+          publishLiveEvent({
+            companyId: agent.companyId,
+            type: "agent.status",
+            payload: {
+              agentId: agent.id,
+              status: "idle",
+              previousStatus: "error",
+              recoveredBy: "reconcileAgentsInError",
+            },
+          });
+        }
+      } catch (err) {
+        logger.error({ err, agentId: agent.id }, "failed to reconcile agent in error");
+      }
+    }
+
+    if (result.recovered > 0) {
+      logger.warn(
+        { recovered: result.recovered, agentIds: result.agentIds },
+        "reconciled agents from error back to idle",
+      );
+    }
+
+    return result;
+  }
+
   return {
     buildRunOutputSilence,
     escalateStrandedRecoveryIssueInPlace,
@@ -6370,6 +6515,7 @@ export function recoveryService(
     recordWatchdogDecision,
     scanSilentActiveRuns,
     reconcileStrandedAssignedIssues,
+    reconcileAgentsInError,
     reconcileLegacyContinuation,
     legacyRepairDispatchBlock,
     sweepStaleIssueLocks,

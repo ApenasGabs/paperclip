@@ -1,7 +1,3 @@
-import {
-  type AdapterModelProfileDefinition,
-} from "@paperclipai/adapter-utils";
-
 export const type = "antigravity_local";
 export const label = "Antigravity CLI (local)";
 
@@ -37,18 +33,6 @@ export const models = [
   { id: "Gemini 3.1 Pro (High)", label: "Gemini 3.1 Pro (High)" },
   { id: "Claude Sonnet 4.6 (Thinking)", label: "Claude Sonnet 4.6 (Thinking)" },
   { id: "Claude Opus 4.6 (Thinking)", label: "Claude Opus 4.6 (Thinking)" },
-];
-
-export const modelProfiles: AdapterModelProfileDefinition[] = [
-  {
-    key: "cheap",
-    label: "Cheap",
-    description: "Use Gemini 3.8 Flash (Low) as the lower-cost Antigravity CLI lane.",
-    adapterConfig: {
-      model: "gemini-3.8-flash-low",
-    },
-    source: "adapter_default",
-  },
 ];
 
 export const agentConfigurationDoc = `# antigravity_local agent configuration

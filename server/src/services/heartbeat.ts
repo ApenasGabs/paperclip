@@ -1626,6 +1626,10 @@ export function heartbeatService(
     });
   }
 
+  async function reconcileAgentsInError(opts?: { coolDownMs?: number }) {
+    return recovery.reconcileAgentsInError(opts);
+  }
+
   async function sweepStaleIssueLocks() {
     return recovery.sweepStaleIssueLocks();
   }
@@ -4096,6 +4100,7 @@ export function heartbeatService(
     scheduleBoundedRetry,
 
     reconcileStrandedAssignedIssues,
+    reconcileAgentsInError,
     recoverPendingSessionGoalActions,
     recoverActiveSessionGoals,
 

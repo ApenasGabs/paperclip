@@ -3111,7 +3111,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }
             if (durableRequest || wakeCommentId ||
                 hasInteractionContinuationWakeContext(enrichedContextSnapshot) ||
-                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId)) {
+                readNonEmptyString(enrichedContextSnapshot.nativeStatusWakeIntentId) ||
+                issue.assigneeAgentId === agentId ||
+                source === "assignment" ||
+                reason === "issue_assigned") {
               await tx.insert(agentWakeupRequests).values({
                 ...durableReceiptFields,
                 companyId: agent.companyId, agentId, source, triggerDetail, reason,
