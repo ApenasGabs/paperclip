@@ -17,14 +17,14 @@ export type GeminiOutputInactivityMonitorResolution =
  * - number > 0     → configured value.
  * - number ≤ 0     → default 30m (and a `non_positive` note for logging).
  */
-export function resolveGeminiInactivityTimeout(rawValue: unknown): GeminiOutputInactivityMonitorResolution {
+export const resolveGeminiInactivityTimeout = (rawValue: unknown): GeminiOutputInactivityMonitorResolution => {
   if (rawValue === null) return { mode: "disabled", reason: "explicit_null" };
   if (typeof rawValue === "number" && Number.isFinite(rawValue)) {
     if (rawValue > 0) return { mode: "configured", timeoutMs: rawValue };
     return { mode: "default", timeoutMs: DEFAULT_GEMINI_OUTPUT_INACTIVITY_TIMEOUT_MS, reason: "non_positive" };
   }
   return { mode: "default", timeoutMs: DEFAULT_GEMINI_OUTPUT_INACTIVITY_TIMEOUT_MS };
-}
+};
 
 export interface GeminiOutputInactivityMonitorState {
   fired: boolean;
@@ -59,15 +59,15 @@ export interface GeminiOutputInactivityMonitorHandle {
   stop(): GeminiOutputInactivityMonitorState;
 }
 
-function defaultIsHeartbeatLine(line: string): boolean {
+const defaultIsHeartbeatLine = (line: string): boolean => {
   const trimmed = line.trim();
   if (!trimmed) return false;
   return parseJson(trimmed) !== null;
-}
+};
 
-export function createGeminiOutputInactivityMonitor(
+export const createGeminiOutputInactivityMonitor = (
   options: GeminiOutputInactivityMonitorOptions,
-): GeminiOutputInactivityMonitorHandle {
+): GeminiOutputInactivityMonitorHandle => {
   const now = options.now ?? (() => Date.now());
   const setTimer = options.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
   const clearTimer = options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
@@ -141,15 +141,15 @@ export function createGeminiOutputInactivityMonitor(
       return { ...state };
     },
   };
-}
+};
 
 /**
  * Format the inactivity monitor error message in the canonical
  * `monitor: no gemini activity (output or process) for {N}m {S}s` shape.
  */
-export function formatGeminiOutputInactivityMonitorErrorMessage(elapsedMs: number): string {
+export const formatGeminiOutputInactivityMonitorErrorMessage = (elapsedMs: number): string => {
   const total = Math.max(0, Math.round(elapsedMs / 1000));
   const minutes = Math.floor(total / 60);
   const seconds = total - minutes * 60;
   return `monitor: no gemini activity (output or process) for ${minutes}m ${seconds}s`;
-}
+};

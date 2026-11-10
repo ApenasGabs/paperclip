@@ -22,7 +22,7 @@ export interface GeminiProcessActivityMonitorHandle {
   stop(): void;
 }
 
-function parseProcStat(stat: string): { processGroupId: number; cpuTicks: number } | null {
+const parseProcStat = (stat: string): { processGroupId: number; cpuTicks: number } | null => {
   const commandEnd = stat.lastIndexOf(")");
   if (commandEnd < 0) return null;
   const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
@@ -31,21 +31,21 @@ function parseProcStat(stat: string): { processGroupId: number; cpuTicks: number
   const systemTicks = Number(fields[12]);
   if (![processGroupId, userTicks, systemTicks].every(Number.isFinite)) return null;
   return { processGroupId, cpuTicks: userTicks + systemTicks };
-}
+};
 
-function parseProcIo(io: string): number {
+const parseProcIo = (io: string): number => {
   let bytes = 0;
   for (const line of io.split("\n")) {
     const match = /^(?:read_bytes|write_bytes):\s+(\d+)$/.exec(line.trim());
     if (match) bytes += Number(match[1]);
   }
   return bytes;
-}
+};
 
-export async function sampleGeminiProcessActivity(
+export const sampleGeminiProcessActivity = async (
   pid: number,
   processGroupId: number | null,
-): Promise<GeminiProcessActivitySnapshot | null> {
+): Promise<GeminiProcessActivitySnapshot | null> => {
   if (process.platform !== "linux") return null;
   const targetProcessGroupId = processGroupId && processGroupId > 0 ? processGroupId : null;
   const entries = targetProcessGroupId ? await fs.readdir("/proc") : [String(pid)];
@@ -74,11 +74,11 @@ export async function sampleGeminiProcessActivity(
   if (processIds.length === 0) return null;
   processIds.sort((left, right) => left - right);
   return { cpuTicks, ioBytes, processIds: processIds.join(",") };
-}
+};
 
-export function createGeminiProcessActivityMonitor(
+export const createGeminiProcessActivityMonitor = (
   options: GeminiProcessActivityMonitorOptions,
-): GeminiProcessActivityMonitorHandle {
+): GeminiProcessActivityMonitorHandle => {
   const intervalMs = options.intervalMs ?? GEMINI_PROCESS_ACTIVITY_POLL_INTERVAL_MS;
   const sample = options.sample ?? (() => sampleGeminiProcessActivity(options.pid, options.processGroupId));
   const setTimer = options.setTimer ?? ((cb, ms) => setTimeout(cb, ms));
@@ -128,4 +128,4 @@ export function createGeminiProcessActivityMonitor(
       }
     },
   };
-}
+};

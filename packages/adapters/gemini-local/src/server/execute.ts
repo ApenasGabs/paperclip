@@ -86,10 +86,10 @@ import {
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const executeGeminiAcp = createGeminiAcpExecutor();
 
-function signalGeminiChild(
+const signalGeminiChild = (
   target: { pid: number | null; processGroupId: number | null },
   signal: NodeJS.Signals,
-): boolean {
+): boolean => {
   if (process.platform !== "win32" && target.processGroupId && target.processGroupId > 0) {
     try {
       process.kill(-target.processGroupId, signal);
@@ -107,7 +107,7 @@ function signalGeminiChild(
     }
   }
   return false;
-}
+};
 
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
