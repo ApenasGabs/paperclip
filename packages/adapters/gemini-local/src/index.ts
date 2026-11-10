@@ -58,6 +58,7 @@ Core fields:
 Operational fields:
 - timeoutSec (number, optional): run timeout in seconds
 - graceSec (number, optional): SIGTERM grace period in seconds
+- outputInactivityTimeoutMs (number | null, optional): inactivity monitor around the gemini child process. Resets whenever the child emits stdout/stderr bytes or, on Linux, its process group shows meaningful CPU, disk I/O, or child-process activity during a silent command. Defaults to 30 * 60_000 ms (30m) when unset or non-positive. Set to \`null\` to disable the monitor entirely. On fire, the adapter sends SIGTERM to the process group, waits 5s, then SIGKILL, surfacing the run as failed with errorCode "gemini_output_inactivity_monitor".
 
 Notes:
 - Explicit ACP models are set via \`GEMINI_MODEL\` before startup; this avoids unsupported \`session/set_config_option\` calls while preserving the ACP transport. Auto continues to use the installed CLI's model selection.

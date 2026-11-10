@@ -4,6 +4,25 @@ export { getConfigSchema } from "./config-schema.js";
 export { listGeminiSkills, syncGeminiSkills } from "./skills.js";
 export { testEnvironment } from "./test.js";
 export {
+  createGeminiOutputInactivityMonitor,
+  formatGeminiOutputInactivityMonitorErrorMessage,
+  resolveGeminiInactivityTimeout,
+  DEFAULT_GEMINI_OUTPUT_INACTIVITY_TIMEOUT_MS,
+  GEMINI_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
+  type GeminiOutputInactivityMonitorHandle,
+  type GeminiOutputInactivityMonitorOptions,
+  type GeminiOutputInactivityMonitorResolution,
+  type GeminiOutputInactivityMonitorState,
+} from "./output-inactivity-monitor.js";
+export {
+  createGeminiProcessActivityMonitor,
+  sampleGeminiProcessActivity,
+  GEMINI_PROCESS_ACTIVITY_POLL_INTERVAL_MS,
+  type GeminiProcessActivityMonitorHandle,
+  type GeminiProcessActivityMonitorOptions,
+  type GeminiProcessActivitySnapshot,
+} from "./process-activity-monitor.js";
+export {
   parseGeminiJsonl,
   isGeminiSessionUnrecoverableError,
   isGeminiTransientNetworkError,
