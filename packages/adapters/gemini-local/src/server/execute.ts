@@ -71,9 +71,43 @@ import {
   resolveGeminiExecutionEngineForRun,
 } from "./acp.js";
 import { resolveGeminiSkillsHome } from "./skills.js";
+import {
+  GEMINI_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
+  createGeminiOutputInactivityMonitor,
+  formatGeminiOutputInactivityMonitorErrorMessage,
+  resolveGeminiInactivityTimeout,
+} from "./output-inactivity-monitor.js";
+import {
+  GEMINI_PROCESS_ACTIVITY_POLL_INTERVAL_MS,
+  createGeminiProcessActivityMonitor,
+  type GeminiProcessActivityMonitorHandle,
+} from "./process-activity-monitor.js";
 
 const __moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const executeGeminiAcp = createGeminiAcpExecutor();
+
+const signalGeminiChild = (
+  target: { pid: number | null; processGroupId: number | null },
+  signal: NodeJS.Signals,
+): boolean => {
+  if (process.platform !== "win32" && target.processGroupId && target.processGroupId > 0) {
+    try {
+      process.kill(-target.processGroupId, signal);
+      return true;
+    } catch {
+      // Fall back to direct child signal if group signaling fails (e.g. group already gone).
+    }
+  }
+  if (target.pid && target.pid > 0) {
+    try {
+      process.kill(target.pid, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+};
 
 function hasNonEmptyEnvValue(env: Record<string, string>, key: string): boolean {
   const raw = env[key];
@@ -232,6 +266,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+
+  const monitorResolution = resolveGeminiInactivityTimeout(config.outputInactivityTimeoutMs);
+  if (monitorResolution.mode === "disabled") {
+    await onLog(
+      "stdout",
+      `[paperclip] Gemini output inactivity monitor is DISABLED via adapterConfig.outputInactivityTimeoutMs=null. Hung gemini runs will only be detected by the platform-level silent-run safety net.\n`,
+    );
+  } else if (monitorResolution.mode === "default" && "reason" in monitorResolution) {
+    await onLog(
+      "stdout",
+      `[paperclip] Ignoring non-positive adapterConfig.outputInactivityTimeoutMs; falling back to default ${monitorResolution.timeoutMs}ms.\n`,
+    );
+  }
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -648,23 +695,113 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       const parsed = consumeAccounting(stdout);
       return { usage: parsed.usage, costUsd: parsed.costUsd, usageBasis: "per_run", provider: "google", biller: "google", billingType, model, complete: parsed.resultEvent !== null };
     });
-    const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
-      onProcessStopped: providerStop.beginInvocation(),
-      cwd,
-      env: invocationEnv,
-      timeoutSec,
-      graceSec,
-      onSpawn,
-      onRuntimeProgress: ctx.onRuntimeProgress,
-      onLog: accountingLog,
-      runLogTail: paperclipBridge?.runLogTail,
-      settleRunDisposition: paperclipBridge?.settleRunDisposition,
-    });
-    await accountingLog.flush();
-    return {
-      proc,
-      parsed: parseGeminiJsonl(proc.stdout),
+
+    let monitorFired = false;
+    let monitorTerminationSignal: NodeJS.Signals | null = null;
+    let monitorElapsedMs = 0;
+    let monitorTimeoutMs = 0;
+    let killTarget: { pid: number | null; processGroupId: number | null } | null = null;
+    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
+    let monitorLogPromise: Promise<unknown> | null = null;
+    const processActivityMonitor: { current: GeminiProcessActivityMonitorHandle | null } = { current: null };
+    const resolvedMonitorTimeoutMs = monitorResolution.mode === "disabled" ? null : monitorResolution.timeoutMs;
+
+    const monitor =
+      monitorResolution.mode === "disabled"
+        ? null
+        : createGeminiOutputInactivityMonitor({
+            timeoutMs: monitorResolution.timeoutMs,
+            onFire: (state) => {
+              monitorFired = true;
+              monitorElapsedMs = (state.firedAt ?? Date.now()) - state.lastEventAt;
+              monitorTimeoutMs = monitorResolution.timeoutMs;
+              const message = formatGeminiOutputInactivityMonitorErrorMessage(monitorElapsedMs);
+              const elapsedSec = Math.round(monitorElapsedMs / 1000);
+              const timeoutSecLabel = Math.round(monitorResolution.timeoutMs / 1000);
+              const logLine =
+                `[paperclip] adapter.invoke ${message}; ` +
+                `timeoutMs=${monitorResolution.timeoutMs} elapsedSinceLastEventMs=${monitorElapsedMs} ` +
+                `outputChunkCount=${state.outputChunkCount} outputBytes=${state.outputBytes} ` +
+                `parsedEvents=${state.parsedEventCount} processActivityCount=${state.processActivityCount} ` +
+                `(timeout=${timeoutSecLabel}s elapsed=${elapsedSec}s); ` +
+                `terminating gemini child via SIGTERM (5s grace, then SIGKILL).\n`;
+              monitorLogPromise = Promise.resolve(onLog("stderr", logLine)).catch(() => {});
+              const target = killTarget;
+              if (!target || (target.pid == null && target.processGroupId == null)) {
+                return;
+              }
+              const sentSig = signalGeminiChild(target, "SIGTERM");
+              if (sentSig) monitorTerminationSignal = "SIGTERM";
+              sigkillTimer = setTimeout(() => {
+                sigkillTimer = null;
+                const stillSent = signalGeminiChild(target, "SIGKILL");
+                if (stillSent) monitorTerminationSignal = "SIGKILL";
+              }, GEMINI_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS);
+              if (typeof (sigkillTimer as { unref?: () => void }).unref === "function") {
+                (sigkillTimer as { unref: () => void }).unref();
+              }
+            },
+          });
+
+    const wrappedOnSpawn = async (meta: { pid: number; processGroupId: number | null; startedAt: string }) => {
+      killTarget = { pid: meta.pid ?? null, processGroupId: meta.processGroupId };
+      if (monitor && resolvedMonitorTimeoutMs !== null && !executionTargetIsRemote) {
+        processActivityMonitor.current = createGeminiProcessActivityMonitor({
+          pid: meta.pid,
+          processGroupId: meta.processGroupId,
+          intervalMs: Math.min(
+            GEMINI_PROCESS_ACTIVITY_POLL_INTERVAL_MS,
+            Math.max(1_000, Math.floor(resolvedMonitorTimeoutMs / 4)),
+          ),
+          onActivity: () => monitor.noteProcessActivity(),
+        });
+      }
+      if (onSpawn) {
+        await onSpawn(meta);
+      }
     };
+
+    try {
+      const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
+        onProcessStopped: providerStop.beginInvocation(),
+        cwd,
+        env: invocationEnv,
+        timeoutSec,
+        graceSec,
+        onSpawn: wrappedOnSpawn,
+        onRuntimeProgress: ctx.onRuntimeProgress,
+        onLog: async (stream, chunk) => {
+          monitor?.noteOutputChunk(stream, chunk);
+          await accountingLog(stream, chunk);
+        },
+        runLogTail: paperclipBridge?.runLogTail,
+        settleRunDisposition: paperclipBridge?.settleRunDisposition,
+      });
+      await accountingLog.flush();
+      return {
+        proc,
+        parsed: parseGeminiJsonl(proc.stdout),
+        monitor: monitorFired
+          ? {
+              fired: true as const,
+              terminationSignal: monitorTerminationSignal,
+              elapsedMsSinceLastEvent: monitorElapsedMs,
+              timeoutMs: monitorTimeoutMs,
+            }
+          : { fired: false as const },
+      };
+    } finally {
+      processActivityMonitor.current?.stop();
+      monitor?.stop();
+      if (sigkillTimer) {
+        clearTimeout(sigkillTimer);
+        sigkillTimer = null;
+      }
+      if (monitorLogPromise) {
+        await monitorLogPromise;
+        monitorLogPromise = null;
+      }
+    }
   };
 
   const toResult = (
@@ -678,10 +815,44 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         errorCode?: string | null;
       };
       parsed: ReturnType<typeof parseGeminiJsonl>;
+      monitor?:
+        | { fired: false }
+        | { fired: true; terminationSignal: NodeJS.Signals | null; elapsedMsSinceLastEvent: number; timeoutMs: number };
     },
     clearSessionOnMissingSession = false,
     isRetry = false,
   ): AdapterExecutionResult => {
+    if (attempt.monitor?.fired) {
+      const errorMessage = formatGeminiOutputInactivityMonitorErrorMessage(attempt.monitor.elapsedMsSinceLastEvent);
+      return {
+        exitCode: null,
+        signal: attempt.monitor.terminationSignal ?? attempt.proc.signal,
+        timedOut: false,
+        usageComplete: false,
+        errorMessage,
+        errorCode: "gemini_output_inactivity_monitor",
+        errorFamily: null,
+        usage: attempt.parsed.usage,
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        provider: "google",
+        biller: "google",
+        model,
+        billingType,
+        costUsd: attempt.parsed.costUsd,
+        resultJson: {
+          stdout: attempt.proc.stdout,
+          stderr: attempt.proc.stderr,
+          outputInactivityMonitor: {
+            kind: "output_inactivity",
+            timeoutMs: attempt.monitor.timeoutMs,
+            elapsedMsSinceLastEvent: attempt.monitor.elapsedMsSinceLastEvent,
+          },
+        },
+        clearSession: true,
+      };
+    }
     const authMeta = detectGeminiAuthRequired({
       parsed: attempt.parsed.resultEvent,
       stdout: attempt.proc.stdout,
