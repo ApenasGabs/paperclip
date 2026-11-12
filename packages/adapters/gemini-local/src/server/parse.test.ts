@@ -6,6 +6,7 @@ import {
   isGeminiSessionUnrecoverableError,
   parseGeminiJsonl,
 } from "./parse.js";
+import { firstMeaningfulStderrLine } from "./utils.js";
 
 describe("parseGeminiJsonl", () => {
   it("collects assistant text from message events with string content", () => {
@@ -247,5 +248,55 @@ describe("Gemini accounting semantics", () => {
   it("preserves explicit zero and distinguishes absent prices", () => {
     expect(parseGeminiJsonl(JSON.stringify({ type: "result", total_cost_usd: 0 })).costUsd).toBe(0);
     expect(parseGeminiJsonl(JSON.stringify({ type: "result" })).costUsd).toBeNull();
+  });
+});
+
+describe("firstMeaningfulStderrLine", () => {
+  it("extracts RESOURCE_EXHAUSTED error while skipping benign [PaperclipMaintenance] lines", () => {
+    const stderr = [
+      "[PaperclipMaintenance] Initializing environment sandbox...",
+      "[paperclip] checking cached models",
+      "Loaded cached credentials from /root/.gemini/token.json",
+      "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'GenerateContent requests'",
+      "process exited with status 3",
+    ].join("\n");
+
+    expect(firstMeaningfulStderrLine(stderr)).toBe(
+      "RESOURCE_EXHAUSTED: Quota exceeded for quota metric 'GenerateContent requests'",
+    );
+  });
+
+  it("prioritizes quota/account exhausted error even if preceded by startup logs", () => {
+    const stderr = [
+      "[PaperclipMaintenance] running wrapper",
+      "Error: All accounts in agy-pool are exhausted",
+    ].join("\n");
+
+    expect(firstMeaningfulStderrLine(stderr)).toBe(
+      "Error: All accounts in agy-pool are exhausted",
+    );
+  });
+
+  it("falls back to first non-benign line when no explicit regex matches", () => {
+    const stderr = [
+      "[PaperclipMaintenance] routine check",
+      "Some unexpected runtime failure occurred here",
+      "secondary info",
+    ].join("\n");
+
+    expect(firstMeaningfulStderrLine(stderr)).toBe(
+      "Some unexpected runtime failure occurred here",
+    );
+  });
+
+  it("returns first non-empty line if all lines are benign", () => {
+    const stderr = [
+      "[PaperclipMaintenance] routine check",
+      "[paperclip] finishing",
+    ].join("\n");
+
+    expect(firstMeaningfulStderrLine(stderr)).toBe(
+      "[PaperclipMaintenance] routine check",
+    );
   });
 });

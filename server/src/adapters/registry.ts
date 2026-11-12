@@ -81,7 +81,6 @@ import {
 import {
   agentConfigurationDoc as antigravityAgentConfigurationDoc,
   models as antigravityModels,
-  modelProfiles as antigravityModelProfiles,
 } from "@paperclipai/adapter-antigravity-local";
 import {
   execute as grokExecute,
@@ -791,7 +790,6 @@ const antigravityLocalAdapter: ServerAdapterModule = {
   sessionCodec: antigravitySessionCodec,
   sessionManagement: getAdapterSessionManagement("antigravity_local") ?? undefined,
   models: antigravityModels,
-  modelProfiles: antigravityModelProfiles,
   supportsLocalAgentJwt: true,
   supportsInstructionsBundle: true,
   requiresMaterializedRuntimeSkills: true,

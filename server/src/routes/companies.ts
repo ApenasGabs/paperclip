@@ -36,6 +36,7 @@ import {
 } from "@paperclipai/shared/company-import-transfer";
 import { badRequest, conflict, forbidden, notFound, unprocessable } from "../errors.js";
 import { PORTABLE_ZIP_UPLOAD_LIMIT_BYTES } from "../http/body-limits.js";
+import { subscribeCompanyLiveEvents } from "../services/live-events.js";
 import { logger } from "../middleware/logger.js";
 import { validate } from "../middleware/validate.js";
 import {
@@ -481,6 +482,56 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
       },
     });
     res.json(result);
+  });
+
+  router.get("/:companyId/events", async (req, res) => {
+    const companyId = req.params.companyId as string;
+    assertCompanyAccess(req, companyId);
+
+    const company = await svc.getById(companyId);
+    if (!company) {
+      res.status(404).json({ error: "Company not found" });
+      return;
+    }
+
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+    res.flushHeaders?.();
+
+    res.write(`event: connected\ndata: ${JSON.stringify({ companyId, connectedAt: new Date().toISOString() })}\n\n`);
+
+    const pingInterval = setInterval(() => {
+      if (!res.writableEnded && res.writable) {
+        res.write(": ping\n\n");
+      }
+    }, 15_000);
+
+    let unsubscribed = false;
+    const safeUnsubscribe = () => {
+      if (!unsubscribed) {
+        unsubscribed = true;
+        clearInterval(pingInterval);
+        unsubscribe();
+      }
+    };
+
+    const unsubscribe = subscribeCompanyLiveEvents(companyId, (event) => {
+      if (unsubscribed || !res.writable) return;
+      try {
+        res.write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+      } catch {
+        safeUnsubscribe();
+      }
+    });
+
+    req.on("close", safeUnsubscribe);
+    req.on("error", safeUnsubscribe);
+    res.on("close", safeUnsubscribe);
+    res.on("finish", safeUnsubscribe);
   });
 
   router.get("/:companyId", async (req, res) => {

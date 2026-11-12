@@ -65,7 +65,7 @@ import {
   isGeminiSessionUnrecoverableError,
   parseGeminiJsonl, createGeminiJsonlParser,
 } from "./parse.js";
-import { firstNonEmptyLine } from "./utils.js";
+import { firstMeaningfulStderrLine, firstNonEmptyLine } from "./utils.js";
 import {
   createGeminiAcpExecutor,
   resolveGeminiExecutionEngineForRun,
@@ -884,7 +884,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const parsedError = typeof attempt.parsed.errorMessage === "string" ? attempt.parsed.errorMessage.trim() : "";
-    const stderrLine = firstNonEmptyLine(attempt.proc.stderr);
+    const stderrLine = firstMeaningfulStderrLine(attempt.proc.stderr);
     const structuredFailure = attempt.parsed.resultEvent
       ? describeGeminiFailure(attempt.parsed.resultEvent)
       : null;
