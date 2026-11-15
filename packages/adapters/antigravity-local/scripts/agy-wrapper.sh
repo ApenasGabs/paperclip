@@ -17,10 +17,12 @@ const REMOTE_HOST = process.env.KRAKEN_COMPUTE_HOST || '192.168.31.4';
 const REMOTE_PORT = Number(process.env.KRAKEN_COMPUTE_PORT || 9224);
 const WOL_MAC = '00:E0:22:20:01:F4';
 const WOL_BROADCAST = '192.168.31.255';
-const MAX_LOCAL_GABISA = Number(process.env.KRAKEN_MAX_LOCAL_SLOTS || 4);
+const parsedSlots = Number.parseInt(process.env.KRAKEN_MAX_LOCAL_SLOTS || '', 10);
+const MAX_LOCAL_GABISA = Number.isFinite(parsedSlots) && parsedSlots > 0 ? parsedSlots : 4;
 // Fase 0 (2026-11-11): worker remoto/WOL opt-in; Dell roda 24/7. Espera de slot limitada.
 const REMOTE_ENABLED = process.env.KRAKEN_ENABLE_REMOTE === '1';
-const SLOT_WAIT_MAX_MS = Number(process.env.KRAKEN_SLOT_WAIT_MAX_SEC || 600) * 1000;
+const parsedWaitSec = Number(process.env.KRAKEN_SLOT_WAIT_MAX_SEC);
+const SLOT_WAIT_MAX_MS = (process.env.KRAKEN_SLOT_WAIT_MAX_SEC !== undefined && Number.isFinite(parsedWaitSec) && parsedWaitSec >= 0 ? parsedWaitSec : 600) * 1000;
 
 function sendWakeOnLan(macStr) {
   try {
@@ -178,6 +180,34 @@ function getModelFamily(modelId) {
   return 'gemini';
 }
 
+function resolveConcreteModel(requestedModel, liveQuota) {
+  if (requestedModel && requestedModel !== 'gemini' && requestedModel !== 'auto') {
+    return { model: requestedModel, family: getModelFamily(requestedModel) };
+  }
+  const chain = [
+    { family: 'claudeGpt', model: 'claude-opus-5-5-medium' },
+    { family: 'argon', model: 'gemini-4-argon-medium' },
+    { family: 'gemini', model: 'gemini-3.8-flash-high' }
+  ];
+  for (const tier of chain) {
+    const q = liveQuota ? (liveQuota[tier.family] ?? 100) : 100;
+    if (q > 5) return tier;
+  }
+  return { family: 'gemini', model: 'gemini-3.8-flash-high' };
+}
+
+function parseResetCooldownMs(text) {
+  const defaultMs = 30 * 60 * 1000;
+  if (!text) return defaultMs;
+  const match = String(text).match(/resets?\s+in\s+(?:(\d+)h)?\s*(?:(\d+)m)?\s*(?:(\d+)s)?/i);
+  if (!match || (!match[1] && !match[2] && !match[3])) return defaultMs;
+  const hours = parseInt(match[1] || '0', 10) || 0;
+  const mins = parseInt(match[2] || '0', 10) || 0;
+  const secs = parseInt(match[3] || '0', 10) || 0;
+  const totalSec = hours * 3600 + mins * 60 + secs;
+  return totalSec > 0 ? (totalSec + 120) * 1000 : defaultMs;
+}
+
 function fetchLiveQuotaForProfile(acc, homeDir) {
   const now = Date.now();
   const cached = acc.liveQuota;
@@ -272,8 +302,9 @@ function selectBestAccount(state, resumeConvId, excludeIds = new Set(), requeste
   if (process.env.AGY_ACCOUNT) {
     const forced = eligibleAccounts.find(a => a.email.includes(process.env.AGY_ACCOUNT) || a.safeId.includes(process.env.AGY_ACCOUNT));
     if (forced) {
-      forced.effectiveModel = requestedModel;
-      forced.effectiveFamily = getModelFamily(requestedModel);
+      const resolved = resolveConcreteModel(requestedModel, forced.liveQuota);
+      forced.effectiveModel = resolved.model;
+      forced.effectiveFamily = resolved.family;
       return forced;
     }
   }
@@ -284,10 +315,11 @@ function selectBestAccount(state, resumeConvId, excludeIds = new Set(), requeste
     const ownerId = state.conversations[resumeConvId];
     const owner = eligibleAccounts.find(a => a.safeId === ownerId);
     if (owner && owner.activeCount === 0) {
-      const q = owner.liveQuota ? (owner.liveQuota[requestedFamily] ?? 100) : 100;
+      const resolved = resolveConcreteModel(requestedModel, owner.liveQuota);
+      const q = owner.liveQuota ? (owner.liveQuota[resolved.family] ?? 100) : 100;
       if (q > 5) {
-        owner.effectiveModel = requestedModel;
-        owner.effectiveFamily = requestedFamily;
+        owner.effectiveModel = resolved.model;
+        owner.effectiveFamily = resolved.family;
         return owner;
       }
     }
@@ -420,8 +452,10 @@ for (let i = 0; i < rawArgs.length; i++) {
     if (m && m !== 'auto') {
       requestedModel = m;
     }
-  } else if (a === '--resume' || a === '-r') {
+  } else if (a === '--resume' || a === '-r' || a === '--conversation') {
     resumeSid = rawArgs[++i];
+  } else if (a.startsWith('--conversation=')) {
+    resumeSid = a.slice('--conversation='.length);
   } else if (a === '--prompt' || a === '-p') {
     promptVal = rawArgs[++i] || '';
   } else if (a.startsWith('--prompt=')) {
@@ -473,6 +507,7 @@ async function runWithFailover() {
     const outcome = await new Promise((resolve) => {
       let quotaErrorDetected = false;
       let rawStderr = '';
+      let quotaErrorText = '';
       let totalTokensUsed = 0;
       let detectedConvId = null;
 
@@ -531,6 +566,7 @@ async function runWithFailover() {
             const errText = JSON.stringify(r);
             if (r.status !== 'SUCCESS' && /quota|429|ResourceExhausted|rate.?limit|exhausted/i.test(errText)) {
               quotaErrorDetected = true;
+              quotaErrorText += ' ' + errText;
             }
             if (!quotaErrorDetected) {
               const isErr = r.status && r.status !== 'SUCCESS';
@@ -578,7 +614,7 @@ async function runWithFailover() {
       rl.on('line', handleLine);
 
       child.on('exit', (code, signal) => {
-        resolve({ code, signal, quotaErrorDetected, rawStderr, totalTokensUsed, detectedConvId });
+        resolve({ code, signal, quotaErrorDetected, rawStderr, quotaErrorText, totalTokensUsed, detectedConvId });
       });
     });
 
@@ -592,13 +628,7 @@ async function runWithFailover() {
         acc.history.push({ ts: Date.now(), tokens: outcome.totalTokensUsed });
       }
       if (outcome.quotaErrorDetected) {
-        let cooldownMs = 30 * 60 * 1000;
-        const match = outcome.rawStderr && outcome.rawStderr.match(/Resets in (\d+)h(?:(\d+)m)?/i);
-        if (match) {
-          const hours = parseInt(match[1], 10) || 0;
-          const mins = parseInt(match[2] || '0', 10) || 0;
-          cooldownMs = (hours * 3600 + mins * 60 + 120) * 1000;
-        }
+        const cooldownMs = parseResetCooldownMs((outcome.rawStderr || '') + '\n' + (outcome.quotaErrorText || ''));
         acc.cooldownUntil = Date.now() + cooldownMs;
         process.stderr.write('[agy-pool] Account ' + chosen.email + ' hit quota limit! Placing in ' + Math.round(cooldownMs / 60000) + 'm cooldown and failing over...\n');
       }
