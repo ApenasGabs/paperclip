@@ -19,17 +19,16 @@ O adaptador `antigravity_local` permite que o Paperclip orquestre sessões do ag
 Para ambientes homelab com múltiplas contas do Google Antigravity compartilhadas, o wrapper em `scripts/agy-wrapper.sh` atua como roteador transparente entre as credenciais disponíveis em `/paperclip/accounts`:
 
 ### Principais Mecanismos de Resiliência:
-1. **Seleção Inteligente de Contas (`selectBestAccount`)**:
-   - Avalia o cooldown de cada conta (`cooldownUntil`).
-   - Prioriza contas saudáveis com cotas ativas para Argon, Gemini e Claude.
-   - Caso todas as contas tenham registrado algum cooldown transitório, realiza fallback para todas as contas restantes no pool que ainda não foram tentadas na invocação atual, evitando aborto prematuro.
-   - Ordena os candidatos por menor tempo restante de cooldown, menor concorrência ativa (`activeCount`), melhor pontuação de cota combinada e menor número de execuções.
+1. **Roteador em Cascata por Cota Real (`selectBestAccount`)**:
+   - Consulta `agy /usage` de cada conta e persiste o resultado em `pool-state.json` (`accounts[id].liveQuota`) com TTL de 5 minutos, evitando uma chamada síncrona por conta a cada execução.
+   - Respeita `AGY_ACCOUNT` (conta forçada) e a continuidade de conversa (`--resume`) quando o dono da conversa está livre e tem cota > 5% na família pedida.
+   - Percorre a cadeia **Opus > Argon > Flash** (a família pedida via `--model` vai para o topo); em cada tier escolhe a conta com **maior cota restante** (> 5%), desempatando por menor concorrência, menor consumo em 5h e menos execuções.
+   - Se todas as contas estiverem com cota crítica em todas as famílias, usa a conta com maior cota residual em `gemini-3.8-flash-high`.
 
-2. **Cascata de Modelos (`resolveModelSequence`)**:
-   - **Argon (Medium)**: ativado quando cota > 5%.
-   - **Claude Sonnet 5.5 (Medium)**: priorizado como alternativa de alto raciocínio quando cota > 10%.
-   - **Gemini 3.8 Flash (High)**: ativado como principal modelo resiliente de raciocínio.
-   - **Gemini 3.8 Flash (Medium)**: fallback final de segurança.
+2. **Slots Locais e Worker Remoto**:
+   - `KRAKEN_MAX_LOCAL_SLOTS` (padrão `4`): execuções simultâneas no host local.
+   - `KRAKEN_SLOT_WAIT_MAX_SEC` (padrão `600`): tempo máximo aguardando slot; ao estourar, o wrapper sai com código `4` listando os PIDs ocupados.
+   - `KRAKEN_ENABLE_REMOTE=1`: habilita Wake-on-LAN e o worker remoto (`KRAKEN_COMPUTE_HOST`/`KRAKEN_COMPUTE_PORT`). Desligado por padrão.
 
 3. **Ciclo de Failover em Falha de Cota**:
    - Quando uma conta atinge limite individual de tokens ou rate limit (`Resets in Xh Ym`), o wrapper registra o cooldown transitório (30 minutos por padrão ou tempo exato indicado pelo serviço).
