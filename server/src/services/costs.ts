@@ -1,5 +1,5 @@
 import { receiptFingerprint } from "./receipt-fingerprint.js";
-import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport } from "@paperclipai/shared";
+import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, unitsToCents, isUuidLike, type MoneyInput, type CostByUserReport } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
@@ -9,11 +9,13 @@ import { budgetService, budgetServiceInTransaction, type BudgetServiceHooks } fr
 import { logActivity, type LogActivityInput, type ActivityPublication } from "./activity-log.js";
 import { withAccountingReadSnapshot, withAccountingTransaction } from "./accounting-transaction.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
+import { lookupRateCard, rateCardUnits } from "./model-rate-cards.js";
 
 import { resolveCostDateRange, type CostDateRange } from "./cost-date-range.js";
 export type { CostDateRange } from "./cost-date-range.js";
 
 const METERED_BILLING_TYPE = "metered_api";
+const SUBSCRIPTION_INCLUDED_BILLING_TYPE = "subscription_included";
 const SUBSCRIPTION_BILLING_TYPES = ["subscription_included", "subscription_overage"] as const;
 
 // Pre-receipt Codex events stored cache reads inside input; Pi/OpenCode used
@@ -26,9 +28,51 @@ export const ordinaryInputTokens = sql<number>`case
     then greatest(0, ${costEvents.inputTokens} - ${costEvents.cachedInputTokens})
   else ${costEvents.inputTokens} end`;
 
+type ApiEquivalentGroup = { provider: string; model: string; inputTokens: number; cachedInputTokens: number; outputTokens: number; eventCount: number };
+export type ApiEquivalentEstimate = { estimatedApiCostCents: number; estimatedApiCostCentsExact: string; estimatedApiCostUnpricedEventCount: number };
+
+/** API-equivalent list price of subscription-included usage, priced from the
+ * reviewed rate cards. Display only: never written to the ledger, so budgets
+ * and billed spend are unaffected. The ledger keeps no cache-write split, so
+ * ordinary input is priced at the uncached input rate. Models without a rate
+ * card are counted rather than guessed. */
+export function estimateApiEquivalentCost(groups: Iterable<ApiEquivalentGroup>): ApiEquivalentEstimate {
+  let units = 0n;
+  let unpriced = 0;
+  for (const group of groups) {
+    const card = lookupRateCard(group.provider, group.model);
+    const groupUnits = card && rateCardUnits(card.rates, {
+      inputTokens: Number(group.inputTokens), cachedInputTokens: Number(group.cachedInputTokens), outputTokens: Number(group.outputTokens),
+    });
+    if (groupUnits === undefined) unpriced += Number(group.eventCount);
+    else units += groupUnits;
+  }
+  const exact = unitsToCents((units + 500_000n) / 1_000_000n);
+  return { estimatedApiCostCents: Number(exact), estimatedApiCostCentsExact: exact, estimatedApiCostUnpricedEventCount: unpriced };
+}
+
+function estimatesByKey<K>(rows: Array<ApiEquivalentGroup & { key: K }>) {
+  const groups = new Map<K, ApiEquivalentGroup[]>();
+  for (const row of rows) groups.set(row.key, [...(groups.get(row.key) ?? []), row]);
+  const estimates = new Map([...groups].map(([key, list]) => [key, estimateApiEquivalentCost(list)]));
+  return (key: K) => estimates.get(key) ?? estimateApiEquivalentCost([]);
+}
+
 function sumAsNumber(column: typeof costEvents.costCents | typeof costEvents.inputTokens | typeof costEvents.cachedInputTokens | typeof costEvents.outputTokens | ReturnType<typeof sql>) {
   return sql<number>`coalesce(sum(${column}), 0)::double precision`;
 }
+
+// Token sums per provider + model for subscription-included events; pair with
+// groupBy(<dimension>, provider, model) and estimatesByKey.
+const apiEquivalentColumns = {
+  provider: costEvents.provider,
+  model: costEvents.model,
+  inputTokens: sumAsNumber(ordinaryInputTokens),
+  cachedInputTokens: sumAsNumber(costEvents.cachedInputTokens),
+  outputTokens: sumAsNumber(costEvents.outputTokens),
+  eventCount: sql<number>`count(*)::int`,
+};
+const subscriptionIncluded = eq(costEvents.billingType, SUBSCRIPTION_INCLUDED_BILLING_TYPE);
 
 function currentUtcMonthWindow(now = new Date()) {
   const year = now.getUTCFullYear();
@@ -197,6 +241,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         })
         .from(costEvents)
         .where(and(...conditions));
+      const apiEquivalent = estimateApiEquivalentCost(await db.select(apiEquivalentColumns).from(costEvents)
+        .where(and(...conditions, subscriptionIncluded)).groupBy(costEvents.provider, costEvents.model));
 
       const pendingConditions = [eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.costAccountingPending, true),
         inArray(heartbeatRuns.status, ["succeeded", "failed", "timed_out", "cancelled", "interrupted"])];
@@ -222,6 +268,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         spendCentsExact: normalizeCents(totalExact),
         budgetCents: company.budgetMonthlyCents,
         utilizationPercent: Number(utilization.toFixed(2)),
+        ...apiEquivalent,
       };
     }),
 
@@ -445,7 +492,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
       if (range?.from) conditions.push(gte(costEvents.occurredAt, range.from));
       if (range?.to) conditions.push(lte(costEvents.occurredAt, range.to));
 
-      const rows = await db
+      const [rows, apiEquivalentRows] = await Promise.all([db
         .select({
           agentId: costEvents.agentId,
           agentName: agents.name,
@@ -473,10 +520,13 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .leftJoin(agents, eq(costEvents.agentId, agents.id))
         .where(and(...conditions))
         .groupBy(costEvents.agentId, agents.name, agents.appearance, agents.status)
-        .orderBy(desc(sumAsNumber(costEvents.costCents)));
+        .orderBy(desc(sumAsNumber(costEvents.costCents))),
+      db.select({ key: costEvents.agentId, ...apiEquivalentColumns }).from(costEvents)
+        .where(and(...conditions, subscriptionIncluded)).groupBy(costEvents.agentId, costEvents.provider, costEvents.model)]);
+      const apiEquivalent = estimatesByKey(apiEquivalentRows);
       return rows.map(row => {
         const appearance = row.agentId ? resolveAgentAppearance(row.agentAppearance, row.agentId) : null;
-        return { ...row, agentAppearance: appearance, avatarUrl: appearance ? agentAvatarUrl(appearance, 512) : undefined };
+        return { ...row, ...apiEquivalent(row.agentId), agentAppearance: appearance, avatarUrl: appearance ? agentAvatarUrl(appearance, 512) : undefined };
       });
     },
 
@@ -649,7 +699,8 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .orderBy(costEvents.provider, costEvents.biller, costEvents.billingType, costEvents.model);
       return rows.map(row => {
         const appearance = row.agentId ? resolveAgentAppearance(row.agentAppearance, row.agentId) : null;
-        return { ...row, agentAppearance: appearance, avatarUrl: appearance ? agentAvatarUrl(appearance, 512) : undefined };
+        const apiEquivalent = estimateApiEquivalentCost(row.billingType === SUBSCRIPTION_INCLUDED_BILLING_TYPE ? [row] : []);
+        return { ...row, ...apiEquivalent, agentAppearance: appearance, avatarUrl: appearance ? agentAvatarUrl(appearance, 512) : undefined };
       });
     },
 
@@ -688,7 +739,7 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
 
       const costCentsExpr = sumAsNumber(costEvents.costCents);
 
-      return db
+      const [rows, apiEquivalentRows] = await Promise.all([db
         .select({
           projectId: projects.id,
           projectName: projects.name,
@@ -705,7 +756,15 @@ export function costService(db: Db, budgetHooks: BudgetServiceHooks = {}) {
         .leftJoin(projects, and(eq(projects.companyId, companyId), sql`${projects.id} = ${effectiveProjectId}`))
         .where(and(...conditions))
         .groupBy(projects.id, projects.name)
-        .orderBy(desc(costCentsExpr));
+        .orderBy(desc(costCentsExpr)),
+      db.select({ key: projects.id, ...apiEquivalentColumns })
+        .from(costEvents)
+        .leftJoin(runProjectLinks, eq(costEvents.heartbeatRunId, runProjectLinks.runId))
+        .leftJoin(projects, and(eq(projects.companyId, companyId), sql`${projects.id} = ${effectiveProjectId}`))
+        .where(and(...conditions, subscriptionIncluded))
+        .groupBy(projects.id, costEvents.provider, costEvents.model)]);
+      const apiEquivalent = estimatesByKey(apiEquivalentRows);
+      return rows.map(row => ({ ...row, ...apiEquivalent(row.projectId) }));
     },
   };
 }
