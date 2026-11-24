@@ -469,6 +469,9 @@ describe("Shared Costs surfaces", () => {
       { ...base, agentId: "sub", agentName: "Subscriber", estimatedApiCostCents: 81000 },
       { ...base, agentId: "metered", agentName: "Metered", costCents: 300, estimatedApiCostCents: 0 },
     ]);
+    costsApiMocks.byProject.mockResolvedValue([
+      { ...base, projectId: "proj-sub", projectName: "Subscription project", estimatedApiCostCents: 81000, estimatedApiCostUnpricedEventCount: 2 },
+    ]);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     root = createRoot(container);
     await act(async () => {
@@ -481,8 +484,21 @@ describe("Shared Costs surfaces", () => {
     expect(card("Subscriber").textContent).toContain("$810.00 API equivalent (est.)");
     expect(card("Subscriber").textContent).toContain("$0.00");
     expect(card("Metered").textContent).not.toContain("API equivalent");
+    const projectRow = [...container.querySelectorAll("span")].find(el => el.textContent === "Subscription project")?.parentElement!;
+    expect(projectRow.className).toContain("flex-col");
+    expect(projectRow.className).toContain("sm:flex-row");
+    expect(projectRow.textContent).toContain("$810.00 API equivalent (est.)");
+    expect(projectRow.textContent).toContain("2 without rate");
     expect(container.textContent).toContain("Subscription-included usage would cost an estimated $810.00 at API list prices");
-    expect(container.textContent).toContain("2 events use models without a published rate");
+    expect(container.textContent).toContain("2 events use models without a published rate and are not included.");
+
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 0, budgetCents: 0, pricingComplete: true,
+      estimatedApiCostCents: 81000, estimatedApiCostUnpricedEventCount: 1 });
+    await act(async () => { await queryClient.invalidateQueries(); });
+    await act(async () => {
+      await vi.waitFor(() => expect(container.textContent).toContain("1 event uses models without a published rate and is not included."));
+    });
+    queryClient.clear();
   });
 
   it.each(surfaces)("preserves the %s heading, breadcrumbs and tab navigation", async (name, props) => {

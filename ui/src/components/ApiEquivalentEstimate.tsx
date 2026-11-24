@@ -13,7 +13,7 @@ export function ApiEquivalentEstimate({
   const unpriced = estimatedApiCostUnpricedEventCount ?? 0;
   if (!estimatedApiCostCents && !unpriced) return null;
   return (
-    <div className={cn("whitespace-nowrap text-xs text-muted-foreground", className)} title={API_EQUIVALENT_ESTIMATE_HINT}>
+    <div className={cn("text-xs text-muted-foreground sm:whitespace-nowrap", className)} title={API_EQUIVALENT_ESTIMATE_HINT}>
       ≈ <span className="font-mono tabular-nums">{formatCents(estimatedApiCostCents ?? 0)}</span> API equivalent (est.)
       {unpriced > 0 ? ` · ${unpriced} without rate` : null}
     </div>

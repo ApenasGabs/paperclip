@@ -696,7 +696,10 @@ export function Costs({
           {subscriptions && Number(subscriptions.subscription.costCents) > 0 && <p className="text-sm text-muted-foreground">Subscription accounts also have {formatCents(Number(subscriptions.subscription.costCents))} in recorded usage charges for this period, separate from monthly fees.</p>}
           {spendData && ((spendData.summary.estimatedApiCostCents ?? 0) > 0 || (spendData.summary.estimatedApiCostUnpricedEventCount ?? 0) > 0) && <p className="text-sm text-muted-foreground" title={API_EQUIVALENT_ESTIMATE_HINT}>
             Subscription-included usage would cost an estimated {formatCents(spendData.summary.estimatedApiCostCents ?? 0)} at API list prices. This is an estimate, not billed spend, and is excluded from totals and budgets.
-            {(spendData.summary.estimatedApiCostUnpricedEventCount ?? 0) > 0 ? ` ${spendData.summary.estimatedApiCostUnpricedEventCount} events use models without a published rate and are not included.` : null}
+            {(spendData.summary.estimatedApiCostUnpricedEventCount ?? 0) > 0 ? (() => {
+              const unpricedCount = spendData.summary.estimatedApiCostUnpricedEventCount ?? 0;
+              return ` ${unpricedCount} ${unpricedCount === 1 ? "event uses" : "events use"} models without a published rate and ${unpricedCount === 1 ? "is" : "are"} not included.`;
+            })() : null}
           </p>}
           {subscriptions && subscriptions.unknown.eventCount > 0 && <p className="text-sm text-muted-foreground">Other billing usage: {formatTokens(subscriptions.unknown.inputTokens + subscriptions.unknown.cachedInputTokens + subscriptions.unknown.outputTokens)} tokens{Number(subscriptions.unknown.costCents) > 0 ? ` · ${formatCents(Number(subscriptions.unknown.costCents))} in recorded charges` : ""}, included in the inference ledger.</p>}
           {subscriptionError && subscriptions && <p role="status" className="text-sm text-muted-foreground">Showing the last loaded API and subscription usage. Updates will resume automatically.</p>}
@@ -864,10 +867,10 @@ export function Costs({
                         spendData?.byProject.map((row, index) => (
                           <div
                             key={row.projectId ?? `unattributed-${index}`}
-                            className="flex items-center justify-between gap-3 border border-border px-3 py-2 text-sm"
+                            className="flex flex-col items-stretch gap-2 border border-border px-3 py-2 text-sm sm:flex-row sm:items-center sm:justify-between sm:gap-3"
                           >
-                            <span className="truncate">{row.projectName ?? row.projectId ?? "Unattributed"}</span>
-                            <div className="flex flex-col items-end gap-1">
+                            <span className="min-w-0 truncate">{row.projectName ?? row.projectId ?? "Unattributed"}</span>
+                            <div className="flex min-w-0 flex-col items-end gap-1">
                               <CostAmount costCents={row.costCents} eventCount={row.eventCount} estimatedEventCount={row.estimatedEventCount} />
                               <ApiEquivalentEstimate {...row} />
                             </div>
