@@ -55,8 +55,8 @@ const ALIASES: Record<string, string> = { opus: "claude-opus-5-5" };
 export function normalizePricingModel(model: string | null | undefined) {
   let id = (model ?? "").trim().toLowerCase();
   id = id.slice(id.lastIndexOf("/") + 1);
-  id = id.replace(/-\d{8}$/, "").replace(/-(?:xhigh|high|medium|low|minimal)$/, "");
-  return ALIASES[id] ?? id;
+  id = id.replace(/-(?:xhigh|high|medium|low|minimal)$/, "").replace(/-\d{8}$/, "");
+  return Object.hasOwn(ALIASES, id) ? ALIASES[id] : id;
 }
 
 export function lookupRateCard(provider: string | null | undefined, model: string | null | undefined): RateCard | undefined {

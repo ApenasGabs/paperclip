@@ -11,7 +11,8 @@ describe("official model rate cards", () => {
   it.each([
     ["claude-opus-5-5", "claude-opus-5-5"], ["opus", "claude-opus-5-5"], ["Claude-Haiku-4-5-20251001", "claude-haiku-4-5"],
     ["models/gemini-2.5-pro", "gemini-2.5-pro"], ["o4-mini-high", "o4-mini"], ["gpt-5-medium", "gpt-5"], ["gpt-5-mini", "gpt-5-mini"],
-    ["anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"],
+    ["anthropic/claude-sonnet-5-5", "claude-sonnet-5-5"], ["claude-opus-5-5-20261001-high", "claude-opus-5-5"],
+    ["constructor", "constructor"], ["__proto__", "__proto__"], ["hasownproperty", "hasownproperty"],
   ])("normalizes %s to %s", (raw, key) => expect(normalizePricingModel(raw)).toBe(key));
 
   it.each([
@@ -40,7 +41,7 @@ describe("provider receipt pricing", () => {
     expect(priced.pricingProvenance).toMatchObject({ source: "rate_card", version: "google-standard-2026-11-24", contextTier: "short" });
   });
 
-  it.each([{ billingType: "subscription_included" }, { model: "gemini-unknown" }, { costUsd: 0.5 }, { pricingContext: { contextTier: "long" as const } }])(
+  it.each<Partial<AdapterUsageCheckpoint>>([{ billingType: "subscription_included" }, { model: "gemini-unknown" }, { costUsd: 0.5 }, { pricingContext: { contextTier: "long" } }])(
     "leaves non-metered, unknown, reported or long-context Gemini receipts untouched: %j", override => {
       const receipt: AdapterUsageCheckpoint = { ...base, provider: "google", biller: "google", model: "gemini-2.5-pro", ...override };
       expect(priceGeminiReceipt(receipt)).toBe(receipt);
