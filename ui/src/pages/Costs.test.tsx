@@ -458,6 +458,33 @@ describe("Shared Costs surfaces", () => {
     expect(breakdown.querySelector('[data-slot="badge"]')!.getAttribute("title")).toContain("1 estimated charge.");
   });
 
+  it("shows the subscription API-equivalent estimate apart from billed spend", async () => {
+    for (const mock of Object.values(costsApiMocks)) mock.mockResolvedValue([]);
+    costsApiMocks.byUser.mockResolvedValue({ activeUserCount: 1, rows: [] });
+    costsApiMocks.summary.mockResolvedValue({ spendCents: 0, budgetCents: 0, pricingComplete: true,
+      estimatedApiCostCents: 81000, estimatedApiCostUnpricedEventCount: 2 });
+    costsApiMocks.financeSummary.mockResolvedValue({ netCents: 0, debitCents: 0, creditCents: 0, estimatedDebitCents: 0, eventCount: 0 });
+    const base = { costCents: 0, inputTokens: 10, cachedInputTokens: 0, outputTokens: 2, apiRunCount: 0, subscriptionRunCount: 1, eventCount: 1, estimatedEventCount: 0 };
+    costsApiMocks.byAgent.mockResolvedValue([
+      { ...base, agentId: "sub", agentName: "Subscriber", estimatedApiCostCents: 81000 },
+      { ...base, agentId: "metered", agentName: "Metered", costCents: 300, estimatedApiCostCents: 0 },
+    ]);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    root = createRoot(container);
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><Costs /></QueryClientProvider></MemoryRouter>);
+    });
+    await act(async () => {
+      await vi.waitFor(() => expect(container.querySelector('[aria-label="Subscriber costs"]')).not.toBeNull());
+    });
+    const card = (name: string) => container.querySelector<HTMLElement>(`[aria-label="${name} costs"]`)!;
+    expect(card("Subscriber").textContent).toContain("$810.00 API equivalent (est.)");
+    expect(card("Subscriber").textContent).toContain("$0.00");
+    expect(card("Metered").textContent).not.toContain("API equivalent");
+    expect(container.textContent).toContain("Subscription-included usage would cost an estimated $810.00 at API list prices");
+    expect(container.textContent).toContain("2 events use models without a published rate");
+  });
+
   it.each(surfaces)("preserves the %s heading, breadcrumbs and tab navigation", async (name, props) => {
     for (const mock of Object.values(costsApiMocks)) mock.mockResolvedValue([]);
     costsApiMocks.byUser.mockResolvedValue({ activeUserCount: 1, rows: [] });

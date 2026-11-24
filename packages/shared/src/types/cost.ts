@@ -28,7 +28,17 @@ export interface CostEvent {
   createdAt: Date;
 }
 
-export interface CostSummary {
+/** API-equivalent list price of subscription-included usage, from reviewed
+ * rate cards. An estimate for comparison only: it is never billed spend and
+ * is excluded from costCents, budgets and utilization. */
+export interface ApiEquivalentCostEstimate {
+  estimatedApiCostCents?: number;
+  estimatedApiCostCentsExact?: string;
+  /** Subscription-included events whose model has no rate card. */
+  estimatedApiCostUnpricedEventCount?: number;
+}
+
+export interface CostSummary extends ApiEquivalentCostEstimate {
   eventCount: number;
   pendingRunCount: number;
   unpricedEventCount: number;
@@ -108,7 +118,7 @@ export interface CostByUserReport {
   rows: CostByUser[];
 }
 
-export interface CostByAgent {
+export interface CostByAgent extends ApiEquivalentCostEstimate {
   agentId: string | null;
   agentName: string | null;
   agentAppearance?: AgentAppearance | null;
@@ -169,7 +179,7 @@ export interface CostByBiller {
 }
 
 /** per-agent breakdown by provider + model, for identifying token-hungry agents */
-export interface CostByAgentModel {
+export interface CostByAgentModel extends ApiEquivalentCostEstimate {
   agentId: string | null;
   agentName: string | null;
   agentAppearance?: AgentAppearance | null;
@@ -204,7 +214,7 @@ export interface CostWindowSpendRow {
 }
 
 /** cost attributed to a project via heartbeat run → activity log → issue → project chain */
-export interface CostByProject {
+export interface CostByProject extends ApiEquivalentCostEstimate {
   projectId: string | null;
   projectName: string | null;
   /** Ledger events in this project and selected date range, not distinct runs. */

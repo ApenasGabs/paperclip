@@ -5,6 +5,7 @@ import { subscriptionsApi } from "../api/subscriptions";
 import { useSearchParams } from "@/lib/router";
 import { CostEstimateLabel } from "../components/CostEstimateLabel";
 import { CostAmount } from "../components/CostAmount";
+import { ApiEquivalentEstimate, API_EQUIVALENT_ESTIMATE_HINT } from "../components/ApiEquivalentEstimate";
 import { CostByUserTable } from "../components/CostByUserTable";
 import { CostDataQualityNotice } from "../components/CostDataQualityNotice";
 import { AgentIdentity } from "@/components/AgentIdentity";
@@ -693,6 +694,10 @@ export function Costs({
             />
           </div>
           {subscriptions && Number(subscriptions.subscription.costCents) > 0 && <p className="text-sm text-muted-foreground">Subscription accounts also have {formatCents(Number(subscriptions.subscription.costCents))} in recorded usage charges for this period, separate from monthly fees.</p>}
+          {spendData && ((spendData.summary.estimatedApiCostCents ?? 0) > 0 || (spendData.summary.estimatedApiCostUnpricedEventCount ?? 0) > 0) && <p className="text-sm text-muted-foreground" title={API_EQUIVALENT_ESTIMATE_HINT}>
+            Subscription-included usage would cost an estimated {formatCents(spendData.summary.estimatedApiCostCents ?? 0)} at API list prices. This is an estimate, not billed spend, and is excluded from totals and budgets.
+            {(spendData.summary.estimatedApiCostUnpricedEventCount ?? 0) > 0 ? ` ${spendData.summary.estimatedApiCostUnpricedEventCount} events use models without a published rate and are not included.` : null}
+          </p>}
           {subscriptions && subscriptions.unknown.eventCount > 0 && <p className="text-sm text-muted-foreground">Other billing usage: {formatTokens(subscriptions.unknown.inputTokens + subscriptions.unknown.cachedInputTokens + subscriptions.unknown.outputTokens)} tokens{Number(subscriptions.unknown.costCents) > 0 ? ` · ${formatCents(Number(subscriptions.unknown.costCents))} in recorded charges` : ""}, included in the inference ledger.</p>}
           {subscriptionError && subscriptions && <p role="status" className="text-sm text-muted-foreground">Showing the last loaded API and subscription usage. Updates will resume automatically.</p>}
           {discoverSubscriptions.error && <div role="status" className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
@@ -783,6 +788,7 @@ export function Costs({
                                   <div className="text-xs text-muted-foreground">
                                     in {formatTokens(row.inputTokens + row.cachedInputTokens)} ({formatTokens(row.cachedInputTokens)} cached) · out {formatTokens(row.outputTokens)}
                                   </div>
+                                  <ApiEquivalentEstimate {...row} />
                                   {(row.apiRunCount > 0 || row.subscriptionRunCount > 0) ? (
                                     <div className="text-xs text-muted-foreground">
                                       {"runs: "}
@@ -825,6 +831,7 @@ export function Costs({
                                           <div className="text-muted-foreground">
                                             {formatTokens(modelRow.inputTokens + modelRow.cachedInputTokens + modelRow.outputTokens)} tok
                                           </div>
+                                          <ApiEquivalentEstimate {...modelRow} />
                                         </div>
                                       </div>
                                     );
@@ -860,7 +867,10 @@ export function Costs({
                             className="flex items-center justify-between gap-3 border border-border px-3 py-2 text-sm"
                           >
                             <span className="truncate">{row.projectName ?? row.projectId ?? "Unattributed"}</span>
-                            <CostAmount costCents={row.costCents} eventCount={row.eventCount} estimatedEventCount={row.estimatedEventCount} />
+                            <div className="flex flex-col items-end gap-1">
+                              <CostAmount costCents={row.costCents} eventCount={row.eventCount} estimatedEventCount={row.estimatedEventCount} />
+                              <ApiEquivalentEstimate {...row} />
+                            </div>
                           </div>
                         ))
                       )}

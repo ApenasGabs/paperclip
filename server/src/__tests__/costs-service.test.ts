@@ -564,6 +564,62 @@ describeEmbeddedPostgres("cost and finance aggregate overflow handling", () => {
     expect(byAgentModelRow?.costCents).toBe(4_000_000_000);
   });
 
+  it("reports the API-equivalent estimate for subscription-included usage without changing billed spend", async () => {
+    const companyId = randomUUID();
+    const agentId = randomUUID();
+    const projectId = randomUUID();
+
+    await db.insert(companies).values({
+      id: companyId,
+      name: "Paperclip",
+      issuePrefix: `T${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false,
+    });
+    await db.insert(agents).values({
+      id: agentId,
+      companyId,
+      name: "Subscription Agent",
+      role: "engineer",
+      status: "active",
+      adapterType: "claude_local",
+      adapterConfig: {},
+      runtimeConfig: {},
+      permissions: {},
+    });
+    await db.insert(projects).values({ id: projectId, companyId, name: "Estimate Project", status: "active" });
+
+    const base = { companyId, agentId, projectId, occurredAt: new Date("2026-04-10T00:00:00.000Z") };
+    await db.insert(costEvents).values([
+      // Historical subscription receipts: costCents 0, priced only as an estimate.
+      { ...base, provider: "anthropic", biller: "anthropic", billingType: "subscription_included", costStatus: "unpriced",
+        model: "claude-sonnet-4-6", inputTokens: 1_000_000, cachedInputTokens: 2_000_000, outputTokens: 100_000, costCents: 0 },
+      { ...base, provider: "anthropic", biller: "anthropic", billingType: "subscription_included", costStatus: "unpriced",
+        model: "claude-sonnet-4-6", inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0, costCents: 0 },
+      { ...base, provider: "openai", biller: "chatgpt", billingType: "subscription_included", costStatus: "unpriced",
+        model: "gpt-5.6-terra", inputTokens: 10, cachedInputTokens: 0, outputTokens: 10, costCents: 0 },
+      // Metered usage is already billed and never enters the estimate.
+      { ...base, provider: "anthropic", biller: "anthropic", billingType: "metered_api",
+        model: "claude-sonnet-4-6", inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 0, costCents: 300 },
+    ]);
+
+    const range = { from: new Date("2026-04-01T00:00:00.000Z"), to: new Date("2026-04-15T23:59:59.999Z") };
+    // $5.10 + $3.00 for the two priced subscription receipts.
+    const estimate = { estimatedApiCostCents: 810, estimatedApiCostCentsExact: "810.0000000", estimatedApiCostUnpricedEventCount: 1 };
+
+    const summary = await costs.summary(companyId, range);
+    expect(summary).toMatchObject({ spendCents: 300, ...estimate });
+    const [byAgentRow] = await costs.byAgent(companyId, range);
+    expect(byAgentRow).toMatchObject({ costCents: 300, ...estimate });
+    const [byProjectRow] = await costs.byProject(companyId, range);
+    expect(byProjectRow).toMatchObject({ projectId, costCents: 300, ...estimate });
+
+    const modelRows = await costs.byAgentModel(companyId, range);
+    expect(modelRows.find(row => row.model === "claude-sonnet-4-6" && row.billingType === "subscription_included"))
+      .toMatchObject({ costCents: 0, estimatedApiCostCents: 810, estimatedApiCostUnpricedEventCount: 0 });
+    expect(modelRows.find(row => row.billingType === "metered_api")).toMatchObject({ costCents: 300, estimatedApiCostCents: 0 });
+    expect(modelRows.find(row => row.model === "gpt-5.6-terra")).toMatchObject({ estimatedApiCostCents: 0, estimatedApiCostUnpricedEventCount: 1 });
+  });
+
   it("aggregates issue costs across recursive descendants only", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

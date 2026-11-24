@@ -1268,6 +1268,7 @@ export type {
   BudgetOverview,
   BudgetPolicyUpsertInput,
   BudgetIncidentResolutionInput,
+  ApiEquivalentCostEstimate,
   CostEvent,
   CostSummary,
   CostDataQualityItem,
