@@ -1,16 +1,8 @@
 import { centsToUsd, unitsToCents, usdToUnits } from "@paperclipai/shared";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
+import { lookupRateCard } from "./model-rate-cards.js";
 
-// Immutable, reviewed rate card. Existing receipts retain their selected rates.
-// https://developers.openai.com/api/docs/pricing (retrieved 2026-09-30)
-const VERSION = "openai-standard-2026-09-30";
-const RATES: Record<string, readonly [string, string, string, string]> = {
-  "gpt-6-astra": ["10", "1", "12.5", "50"],
-  "gpt-6-sol": ["2", "0.2", "2.5", "10"],
-  "gpt-6.1-sol": ["2", "0.1", "2.5", "10"],
-  "gpt-6-luna": ["0.1", "0.01", "0.125", "0.5"],
-  "gpt-5.6-sol": ["4", "0.4", "5", "20"],
-};
+// Immutable, reviewed rate cards live in model-rate-cards.ts.
 
 /** Price new, direct-API receipts only. A token-price estimate is not an invoice.
  * Run totals cannot establish per-request context length or cache-write splits;
@@ -31,9 +23,9 @@ export function priceCodexReceipt(
     receipt.usageByModel?.length
   )
     return receipt;
-  const model = receipt.model ?? "";
-  const rates = Object.hasOwn(RATES, model) ? RATES[model] : undefined;
-  if (!rates) return receipt;
+  const card = lookupRateCard("openai", receipt.model);
+  if (!card) return receipt;
+  const rates = card.rates;
   const usage = receipt.usage;
   const counts = [
     usage.inputTokens - (usage.cacheWriteTokens ?? 0),
@@ -85,8 +77,8 @@ export function priceCodexReceipt(
     costStatus: "estimated",
     pricingProvenance: {
       source: "rate_card",
-      version: VERSION,
-      evidence: `https://developers.openai.com/api/docs/pricing; ${assumptions.join("; ")}`,
+      version: card.version,
+      evidence: `${card.evidence}; ${assumptions.join("; ")}`,
       inputCentsPerMillion: unitsToCents(usdToUnits(rates[0])),
       cachedInputCentsPerMillion: unitsToCents(usdToUnits(rates[1])),
       cacheWriteCentsPerMillion: unitsToCents(usdToUnits(rates[2])),

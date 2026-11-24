@@ -52,6 +52,15 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(idleWorkSnapshot().active).toBe(before);
   });
 
+  it("prices metered Gemini receipts from the official rate card", async () => {
+    const { recorder: usage } = await recorder();
+    const receipt = await usage.capture({ complete: true, usageBasis: "per_run", provider: "google", biller: "google", billingType: "metered_api",
+      model: "models/gemini-2.5-flash", usage: { inputTokens: 1_000_000, cachedInputTokens: 0, outputTokens: 1_000_000 } });
+    expect(receipt).toMatchObject({ costUsdExact: "2.800000000", costStatus: "estimated",
+      pricingProvenance: { source: "rate_card", version: "google-standard-2026-11-24", contextTier: "short" } });
+    await usage.persistFailure();
+  });
+
   it("keeps unpersisted capture failure as a blocker until its failure fence reaches the database", async () => {
     const before = idleWorkSnapshot().active;
     const { recorder: usage, directory, runId, setOffline } = await recorder();
