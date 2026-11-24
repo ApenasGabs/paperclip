@@ -485,6 +485,7 @@ describe("Shared Costs surfaces", () => {
     expect(card("Subscriber").textContent).toContain("$0.00");
     expect(card("Metered").textContent).not.toContain("API equivalent");
     const projectRow = [...container.querySelectorAll("span")].find(el => el.textContent === "Subscription project")?.parentElement!;
+    expect(projectRow.closest(".grid > div")?.className).toContain("min-w-0");
     expect(projectRow.className).toContain("flex-col");
     expect(projectRow.className).toContain("sm:flex-row");
     expect(projectRow.textContent).toContain("$810.00 API equivalent (est.)");

@@ -855,7 +855,7 @@ export function Costs({
                   {userSpendData && <CostByUserTable report={userSpendData} />}
                 </div>
 
-                <div className="space-y-4">
+                <div className="min-w-0 space-y-4">
                   <Card className="gap-3 py-4">
                     <CardHeader className="gap-0 px-5">
                       <CardTitle className="text-base">By project</CardTitle>
