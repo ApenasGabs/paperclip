@@ -1,10 +1,9 @@
-import { centsToUsd, unitsToCents, usdToUnits } from "@paperclipai/shared";
+import { centsToUsd, unitsToCents } from "@paperclipai/shared";
 import type { AdapterUsageCheckpoint } from "@paperclipai/adapter-utils";
+import { lookupRateCard, rateCardProvenance, rateCardUnits } from "./model-rate-cards.js";
 
-// Direct Anthropic API list prices, verified 2026-10-07:
-// https://platform.claude.com/docs/en/about-claude/pricing
-// Keep this bounded to the qualified model; aliases and other billers stay unknown.
-const RATES = ["2", "0.2", "4", "10"] as const;
+// Direct Anthropic API list prices: see model-rate-cards.ts.
+// Only reviewed models and aliases are priced; other billers stay unknown.
 
 /** A complete token receipt can receive an explicit estimate, never an invoice
  * claim. ACP aggregates cache writes without TTL; conservatively price them at
@@ -13,19 +12,16 @@ export function priceAnthropicReceipt(receipt: AdapterUsageCheckpoint): AdapterU
   if (!receipt.complete || !receipt.usage || receipt.usageBasis !== "per_run"
     || receipt.provider !== "anthropic" || receipt.biller !== "anthropic"
     || !["api", "metered_api"].includes(receipt.billingType ?? "")
-    || receipt.model !== "claude-sonnet-5" || receipt.usageByModel?.length
+    || receipt.usageByModel?.length
     || receipt.costUsd != null || receipt.costUsdExact != null || receipt.cacheAdjustedCostUsd != null
     || (receipt.pricingContext?.serviceTier && !["standard", "default"].includes(receipt.pricingContext.serviceTier))) return receipt;
+  const card = lookupRateCard("anthropic", receipt.model);
   const usage = receipt.usage;
-  if (usage.cacheWriteTokens === undefined || usage.cachedInputTokens === undefined) return receipt;
-  const counts = [usage.inputTokens - usage.cacheWriteTokens, usage.cachedInputTokens, usage.cacheWriteTokens, usage.outputTokens];
-  if (counts.some(count => !Number.isSafeInteger(count) || count < 0)) return receipt;
-  const numerator = counts.reduce((total, count, index) => total + BigInt(count) * usdToUnits(RATES[index]), 0n);
+  if (!card || usage.cacheWriteTokens === undefined || usage.cachedInputTokens === undefined) return receipt;
+  const numerator = rateCardUnits(card.rates, usage);
+  if (numerator === undefined) return receipt;
   return { ...receipt, costUsdExact: centsToUsd(unitsToCents((numerator + 500_000n) / 1_000_000n)), costStatus: "estimated",
-    pricingProvenance: {
-      source: "rate_card", version: "anthropic-standard-2026-10-07",
-      evidence: "https://platform.claude.com/docs/en/about-claude/pricing; standard global API pricing assumed; cache-write TTL unavailable, one-hour upper rate used; not an invoice",
-      inputCentsPerMillion: "200", cachedInputCentsPerMillion: "20", cacheWriteCentsPerMillion: "400", outputCentsPerMillion: "1000", serviceTier: "standard",
-    },
+    pricingProvenance: { ...rateCardProvenance(card, "standard global API pricing assumed; cache-write TTL unavailable, one-hour upper rate used; not an invoice"),
+      serviceTier: "standard" },
   };
 }
